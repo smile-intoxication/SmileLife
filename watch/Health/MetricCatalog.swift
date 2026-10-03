@@ -99,9 +99,47 @@ enum MetricCatalog {
 
     // MARK: - v1 指标清单
 
+    /// watchOS 27 才有的指标；**老 SDK 上返回空数组**。
+    ///
+    /// ⚠️ 为什么单独抽成一个属性，而不是直接写在 `all` 数组里：
+    /// **Swift 不允许在数组字面量里写 `#if`** —— `#if` 是「声明」，
+    /// 而数组元素位置需要「表达式」，会报
+    /// `expected expression in container literal`，
+    /// 并且引发几十条级联语法错误（CI 第二轮就是这么挂的）。
+    /// `#if` 只能包在声明外面，所以这里用一个计算属性承载。
+    ///
+    /// `HAS_WATCHOS_27_SDK` 由 CI 探测 watchOS SDK 版本后决定是否定义，
+    /// 见 `.github/workflows/build.yml` 的「探测 watchOS SDK」步骤。
+    private static var watchOS27Metrics: [MetricDescriptor] {
+        #if HAS_WATCHOS_27_SDK
+        return [
+            // 🆕 S12/Ultra 4 的新电学心率传感器让高频 HRV 成为可能。
+            // ⚠️ 两个未解问题，必须真机验证：
+            // 1. Apple 说 S12 提供「Recovery HRV」和「overall HRV」两个变体，
+            //    但**没有说**它们是否分别对应 RMSSD 和 SDNN —— 所以两个类型都要读、再对比；
+            // 2. 官方文档这一页**只有符号声明、没有 Discussion**，写入频率完全未知。
+            MetricDescriptor(
+                id: "hrv_rmssd",
+                title: "HRV (RMSSD)",
+                unitSuffix: "ms",
+                symbolName: "waveform.path.ecg.rectangle",
+                sampleType: q(.heartRateVariabilityRMSSD)!,
+                shape: .quantity(HKUnit.secondUnit(with: .milli), decimals: 0),
+                enabledByDefault: true
+            )
+        ]
+        #else
+        return []
+        #endif
+    }
+
     /// v1 只收「Apple Watch 独有产生」的指标 —— 这些才是手表端真正该负责的数据。
     /// 注意：走路稳定性 / 步态不对称 / 步速 等**是 iPhone 产生的**，不放进手表端。
-    static let all: [MetricDescriptor] = [
+    ///
+    /// 结构是 `[心率族] + [watchOS 27 专属] + [其余]`，
+    /// 拆成三段就是因为 `#if` 不能写在数组字面量里（见 `watchOS27Metrics`）。
+    static let all: [MetricDescriptor] =
+        [
         // ——— 心率族（全部 ★Watch 独有）———
         MetricDescriptor(
             id: "heart_rate",
@@ -139,31 +177,10 @@ enum MetricCatalog {
             sampleType: q(.heartRateVariabilitySDNN)!,
             shape: .quantity(HKUnit.secondUnit(with: .milli), decimals: 0),
             enabledByDefault: true
-        ),
-        // 🆕 watchOS 27+ 才有。S12/Ultra 4 的新电学心率传感器让高频 HRV 成为可能。
-        //
-        // ⚠️ 两个未解问题，必须真机验证：
-        // 1. Apple 说 S12 提供「Recovery HRV」和「overall HRV」两个变体，
-        //    **但没有说**它们是否分别对应 RMSSD 和 SDNN——所以两个类型都要读，然后对比；
-        // 2. 官方文档这一页**只有符号声明、没有 Discussion**，写入频率完全未知。
-        //
-        // ⚠️ 编译门控：`heartRateVariabilityRMSSD` 这个常量只有 **watchOS 27 SDK** 里才有。
-        //    如果 CI 的 runner 装的是 Xcode 26（watchOS 26 SDK），这个符号不存在，
-        //    编译会直接报 "cannot find 'heartRateVariabilityRMSSD' in scope"。
-        //    所以用编译条件把它包起来，由 CI 探测到 watchOS 27 SDK 时才定义这个条件。
-        //    见 .github/workflows/build.yml 的「探测 watchOS SDK」步骤。
-        #if HAS_WATCHOS_27_SDK
-        MetricDescriptor(
-            id: "hrv_rmssd",
-            title: "HRV (RMSSD)",
-            unitSuffix: "ms",
-            symbolName: "waveform.path.ecg.rectangle",
-            sampleType: q(.heartRateVariabilityRMSSD)!,
-            shape: .quantity(HKUnit.secondUnit(with: .milli), decimals: 0),
-            enabledByDefault: true
-        ),
-        #endif
-
+        )
+        ]
+        + watchOS27Metrics
+        + [
         // ——— 呼吸 / 血氧 / 腕温 ———
         MetricDescriptor(
             id: "respiratory_rate",
