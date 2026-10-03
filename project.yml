@@ -4,8 +4,8 @@
 # 因为开发机是 Windows，**无法产出一个可靠的 .xcodeproj**（那是 Xcode 的私有格式）。
 # 用文本描述工程，CI 上一条 `xcodegen generate` 就能生成，而且以后工程结构变更可以 diff。
 #
-# ⚠️ 这份 spec 没有被真机验证过，第一次在 CI 上跑很可能会报错并需要迭代。
-#    最容易出问题的两处已用 ⚠️ 标出。
+# ✅ 已在 CI 上验证通过（run #3：BUILD SUCCEEDED，零 error）。
+#    watch app 正确嵌入 iOS app 的 Watch/ 目录，widget 以 .appex 嵌入 watch app 的 PlugIns/。
 
 name: AppleWatchHealth
 
@@ -54,9 +54,10 @@ targets:
         CODE_SIGN_ENTITLEMENTS: ios/iOSApp.entitlements
         TARGETED_DEVICE_FAMILY: "1"
     dependencies:
-      # ⚠️【风险点 1】把 watch app 嵌进 iOS app 的 Watch 目录。
-      #    Xcode 用的是 dstSubfolderSpec=16 + dstPath="$(CONTENTS_FOLDER_PATH)/Watch"。
-      #    如果 CI 报 "no such target" 或产物里没有 Watch 目录，就调这里。
+      # ✅ 已验证正确（run #3 的成功日志）：
+      #    Copy .../Debug-iphoneos/AppleWatchHealth.app/Watch/AppleWatch Health App.app
+      #    并且通过了 ValidateEmbeddedBinary。
+      #    即 XcodeGen 自动用了 dstSubfolderSpec=16 + dstPath="$(CONTENTS_FOLDER_PATH)/Watch"。
       - target: AppleWatchHealth Watch App
         embed: true
         codeSign: true
@@ -94,9 +95,9 @@ targets:
         CODE_SIGN_ENTITLEMENTS: watch/WatchApp.entitlements
         TARGETED_DEVICE_FAMILY: "4"
     dependencies:
-      # ⚠️【风险点 2】Widget Extension 要被嵌进 watch app 的 PlugIns 目录。
-      #    XcodeGen 对 app-extension 类型的依赖默认就会 embed 到 PlugIns，
-      #    如果没有，就显式加上 copy: { destination: plugins }。
+      # ✅ 已验证正确（run #3 的成功日志）：
+      #    产物是 .appex（不是 .app），被 Copy 进 watch app 的 PlugIns/，
+      #    并通过了 ValidateEmbeddedBinary。XcodeGen 对 app-extension 类型默认就 embed 到 PlugIns。
       - target: AppleWatchHealth Widget
         embed: true
         codeSign: true
