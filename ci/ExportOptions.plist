@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  ⚠️ method 的取值在 Xcode 版本之间改过名。
+	  Xcode 15 起 UI 显示的是：Debugging / Release Testing / App Store Connect。
+	  对应到这里的字符串通常是：
+	      app-store-connect    → 上传 TestFlight / App Store（当前使用）
+	      release-testing      → Ad Hoc 给已注册设备
+	      debugging            → Development 给已注册设备调试
+
+	  不确定时，在 CI 里跑 `xcodebuild -help`，会列出当前 Xcode 支持的全部取值。
+	-->
+	<key>method</key>
+	<string>app-store-connect</string>
+
+	<!-- 让 xcodebuild 直接上传到 App Store Connect，不再需要单独的 altool 步骤 -->
+	<key>destination</key>
+	<string>upload</string>
+
+	<!-- 自动签名 -->
+	<key>signingStyle</key>
+	<string>automatic</string>
+
+	<!-- 上传符号，方便 Apple 给你符号化崩溃日志（我们没有 Mac 看日志，这个很重要） -->
+	<key>uploadSymbols</key>
+	<true/>
+
+	<!-- 让 Xcode 自动管理构建号 -->
+	<key>manageAppVersionAndBuildNumber</key>
+	<true/>
+
+	<!-- 先只给内部测试用，避免开发构建被误提交到 App Store 审核队列。
+	     以后要对外测试时把这一项删掉。 -->
+	<key>testFlightInternalTestingOnly</key>
+	<true/>
+</dict>
+</plist>

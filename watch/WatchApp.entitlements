@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- HealthKit 读权限（本项目只读，不写入） -->
+	<key>com.apple.developer.healthkit</key>
+	<true/>
+
+	<!--
+	  后台投递 entitlement。
+	  watchOS 8+ 起必需，否则 enableBackgroundDelivery 会以 errorAuthorizationDenied 失败。
+	  iOS 15 / watchOS 8+ 对应 com.apple.developer.healthkit.background-delivery。
+	-->
+	<key>com.apple.developer.healthkit.background-delivery</key>
+	<true/>
+
+	<!-- App Group：主 app 与小组件共享快照文件 -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.smile.intoxication.applewatchhealth</string>
+	</array>
+</dict>
+</plist>

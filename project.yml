@@ -1,0 +1,119 @@
+# XcodeGen 工程描述
+#
+# 为什么用 XcodeGen 而不是提交一个 .xcodeproj：
+# 因为开发机是 Windows，**无法产出一个可靠的 .xcodeproj**（那是 Xcode 的私有格式）。
+# 用文本描述工程，CI 上一条 `xcodegen generate` 就能生成，而且以后工程结构变更可以 diff。
+#
+# ⚠️ 这份 spec 没有被真机验证过，第一次在 CI 上跑很可能会报错并需要迭代。
+#    最容易出问题的两处已用 ⚠️ 标出。
+
+name: AppleWatchHealth
+
+options:
+  bundleIdPrefix: com.smile.intoxication  # 必须和开发者门户里注册的 App ID 前缀一致
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "18.0"
+    watchOS: "27.0"                     # ← 只支持 watchOS 27+（已确认）
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"                # ← 先用 Swift 5 语言模式，避免并发标注刷屏
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+
+  # ============================================================
+  # iOS 配套 App（极简，只为承载 watch app 的打包与分发）
+  # ============================================================
+  AppleWatchHealth:
+    type: application
+    platform: iOS
+    sources:
+      - path: ios
+    info:
+      path: ios/Info.plist
+      properties:
+        CFBundleDisplayName: 健康数据
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # 一次性免掉每次上传都要回答的"出口合规（是否使用加密）"问题
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.smile.intoxication.applewatchhealth
+        CODE_SIGN_ENTITLEMENTS: ios/iOSApp.entitlements
+        TARGETED_DEVICE_FAMILY: "1"
+    dependencies:
+      # ⚠️【风险点 1】把 watch app 嵌进 iOS app 的 Watch 目录。
+      #    Xcode 用的是 dstSubfolderSpec=16 + dstPath="$(CONTENTS_FOLDER_PATH)/Watch"。
+      #    如果 CI 报 "no such target" 或产物里没有 Watch 目录，就调这里。
+      - target: AppleWatchHealth Watch App
+        embed: true
+        codeSign: true
+        copy:
+          destination: productsDirectory
+          subpath: "$(CONTENTS_FOLDER_PATH)/Watch"
+    scheme:
+      testTargets: []
+
+  # ============================================================
+  # watchOS App（本项目的主体）
+  # ============================================================
+  AppleWatchHealth Watch App:
+    type: application
+    platform: watchOS
+    sources:
+      - path: watch/App
+      - path: watch/Health
+      - path: watch/Storage
+      - path: watch/Upload
+    info:
+      path: watch/App/Info.plist
+      properties:
+        CFBundleDisplayName: 健康数据
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: com.smile.intoxication.applewatchhealth
+        WKRunsIndependentlyOfCompanionApp: true
+        # 缺这两个键会在请求授权时直接崩溃
+        NSHealthShareUsageDescription: 用于读取你的心率、HRV、血氧、睡眠等健康数据，并显示在手表和表盘上。
+        NSHealthUpdateUsageDescription: 本 App 不会向健康 App 写入数据。
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.smile.intoxication.applewatchhealth.watchkitapp
+        CODE_SIGN_ENTITLEMENTS: watch/WatchApp.entitlements
+        TARGETED_DEVICE_FAMILY: "4"
+    dependencies:
+      # ⚠️【风险点 2】Widget Extension 要被嵌进 watch app 的 PlugIns 目录。
+      #    XcodeGen 对 app-extension 类型的依赖默认就会 embed 到 PlugIns，
+      #    如果没有，就显式加上 copy: { destination: plugins }。
+      - target: AppleWatchHealth Widget
+        embed: true
+        codeSign: true
+    scheme: {}
+
+  # ============================================================
+  # watchOS Widget Extension（表盘小组件）
+  # ============================================================
+  AppleWatchHealth Widget:
+    type: app-extension
+    platform: watchOS
+    sources:
+      - path: watch/Widget
+    info:
+      # WidgetKit 扩展需要 Info.plist 里有嵌套的 NSExtension 字典，
+      # 所以这里必须用 info.properties 显式写，不能用 INFOPLIST_KEY_ 构建设置。
+      path: watch/Widget/Info.plist
+      properties:
+        CFBundleDisplayName: 健康数据
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.smile.intoxication.applewatchhealth.watchkitapp.widget
+        CODE_SIGN_ENTITLEMENTS: watch/Widget.entitlements
+        TARGETED_DEVICE_FAMILY: "4"

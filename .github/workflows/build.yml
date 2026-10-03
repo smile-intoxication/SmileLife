@@ -1,0 +1,213 @@
+name: Build
+
+# 用法：
+#   - push 到 main 会自动跑「编译检查」（不需要签名、不需要任何密钥）
+#   - 想打包上传 TestFlight 时，手动触发（Actions → Build → Run workflow → testflight）
+#
+# 关于 runner：
+#   macos-15 是当前（2026）GitHub 提供的 macOS runner 标签之一。
+#   第一次跑请先看「打印可用 Xcode」那一步的输出，确认镜像里有没有带
+#   watchOS 27 SDK 的 Xcode —— 如果没有，需要把 runs-on 换成已升级的镜像标签，
+#   或等 GitHub 更新镜像。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "compile = 只编译检查；testflight = 打包并上传 TestFlight"
+        type: choice
+        options: [compile, testflight]
+        default: compile
+
+jobs:
+  # ============================================================
+  # 阶段①：编译检查（零成本，不需要 Apple 账号、不需要证书）
+  # ============================================================
+  compile:
+    name: 编译检查（跳过签名）
+    runs-on: macos-15
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'compile'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 打印可用 Xcode
+        run: |
+          echo "=== /Applications 下的 Xcode ==="
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "（没有找到 Xcode）"
+          echo "=== 当前默认版本 ==="
+          xcodebuild -version || true
+          echo "=== 可用 SDK（关注 watchos 版本）==="
+          xcodebuild -showsdks 2>/dev/null | grep -i watch || true
+
+      - name: 选择最新 Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          echo "使用: $latest"
+          sudo xcode-select -s "$latest/Contents/Developer"
+          xcodebuild -version
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成 Xcode 工程
+        run: |
+          xcodegen generate --spec project.yml
+          echo "=== 生成的 targets ==="
+          xcodebuild -list -project AppleWatchHealth.xcodeproj
+
+      - name: 编译（CODE_SIGNING_ALLOWED=NO）
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project AppleWatchHealth.xcodeproj \
+            -scheme "AppleWatchHealth" \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee build.log
+
+      - name: 提取错误摘要到 Job Summary
+        if: always()
+        run: |
+          {
+            echo "## 编译结果"
+            echo ""
+            if [ -f build.log ]; then
+              echo "### 错误（去重）"
+              echo '```'
+              grep -E "error: " build.log | sed 's|.*/applewatch/||' | sort -u | head -n 80 || echo "（没有匹配到 error:）"
+              echo '```'
+              echo "### 警告数量"
+              echo '```'
+              grep -c "warning: " build.log || echo 0
+              echo '```'
+            else
+              echo "没有生成 build.log"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传完整日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: warn
+
+      - name: 编译是否通过
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "编译失败，请看上面的错误摘要或下载 build-log 产物。"
+          exit 1
+
+  # ============================================================
+  # 阶段③：打包 + 上传 TestFlight
+  # 需要先在仓库 Secrets 里配置（见 docs/无Mac打包部署指南.md）：
+  #   TEAM_ID, ASC_KEY_ID, ASC_ISSUER_ID, ASC_PRIVATE_KEY
+  # ============================================================
+  testflight:
+    name: 打包并上传 TestFlight
+    runs-on: macos-15
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'testflight'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查密钥是否配好
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          missing=0
+          for v in TEAM_ID ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY; do
+            if [ -z "${!v}" ]; then echo "❌ 缺少 secret: $v"; missing=1; fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "请先按 docs/无Mac打包部署指南.md 配置 Secrets。"
+            exit 1
+          fi
+          echo "✅ 密钥齐备"
+
+      - name: 选择最新 Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$latest/Contents/Developer"
+          xcodebuild -version
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 写入 App Store Connect API Key
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/private_keys
+          printf '%s' "$ASC_PRIVATE_KEY" > ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
+          chmod 600 ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
+
+      - name: 生成工程
+        run: xcodegen generate --spec project.yml
+
+      - name: Archive
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project AppleWatchHealth.xcodeproj \
+            -scheme "AppleWatchHealth" \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/AppleWatchHealth.xcarchive \
+            -derivedDataPath build/DerivedData \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/private_keys/AuthKey_${ASC_KEY_ID}.p8 \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            2>&1 | tee archive.log
+
+      - name: 导出 .ipa
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -o pipefail
+          xcodebuild -exportArchive \
+            -archivePath build/AppleWatchHealth.xcarchive \
+            -exportPath build/export \
+            -exportOptionsPlist ci/ExportOptions.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/private_keys/AuthKey_${ASC_KEY_ID}.p8 \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            2>&1 | tee export.log
+
+      - name: 上传 .ipa 作为可下载产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipa
+          path: build/export/*.ipa
+          if-no-files-found: error
+
+      - name: 上传过程日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sign-logs
+          path: |
+            archive.log
+            export.log
+          if-no-files-found: warn

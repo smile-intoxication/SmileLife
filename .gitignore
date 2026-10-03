@@ -1,0 +1,38 @@
+# ---- Xcode / Swift ----
+build/
+DerivedData/
+*.xcarchive
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# XcodeGen 生成物（工程由 CI 现场生成，不入库）
+*.xcodeproj
+*.xcworkspace
+
+# Xcode 用户态文件
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Packages/
+Package.resolved
+
+# ---- macOS ----
+.DS_Store
+
+# ---- CI 产物 ----
+build.log
+archive.log
+export.log
+
+# ---- 密钥（绝对不要入库）----
+*.p8
+*.p12
+*.mobileprovision
+*.cer
+*.key

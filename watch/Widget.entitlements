@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  小组件只需要读 App Group 里的快照文件。
+	  刻意**不**给 HealthKit：小组件不查 HealthKit（设备锁定时会读不到、且拖慢 timeline），
+	  这是本项目的核心设计选择之一，见 docs/手表端App-设计方案.md §4 决策 2。
+	-->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.smile.intoxication.applewatchhealth</string>
+	</array>
+</dict>
+</plist>

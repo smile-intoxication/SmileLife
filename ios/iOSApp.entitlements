@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  iOS 端目前是极简占位 app，只用于承载 watch app 的打包与分发。
+	  暂时不需要 HealthKit，也不需要 App Group（跨设备无法共享 App Group）。
+	  等做 iPhone 端数据存储/上传时再按需增加。
+	-->
+</dict>
+</plist>
