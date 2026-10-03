@@ -4,8 +4,8 @@ import AppIntents
 
 // MARK: - 可选的指标（AppEntity）
 
-/// 用 `AppEntity` + `EntityQuery` 而不是 `AppEnum`，是为了让"可选指标"**从注册表动态生成**：
-/// 以后在 `MetricCatalog` 里加一个指标，小组件的配置界面里就自动多一个选项，不用改这个文件。
+/// 用 `AppEntity` + `EntityQuery` 而不是 `AppEnum`，是为了让"可选指标"**从快照动态生成**：
+/// 手表端采到新指标后，小组件的配置界面里会自动多一个选项，不用改这个文件。
 struct MetricEntity: AppEntity {
 
     static var typeDisplayRepresentation: TypeDisplayRepresentation = "健康指标"
@@ -16,31 +16,50 @@ struct MetricEntity: AppEntity {
     var symbolName: String
 
     var displayRepresentation: DisplayRepresentation {
-        DisplayRepresentation(title: "\(title)", image: .init(systemName: symbolName))
+        // 官方签名是 init(systemName:isTemplate:)，两个参数都要给。
+        // （没有 systemName(_:) 这种静态方法，写错会在下一轮 CI 才暴露。）
+        DisplayRepresentation(
+            title: "\(title)",
+            image: DisplayRepresentation.Image(systemName: symbolName, isTemplate: nil)
+        )
     }
 }
 
+/// 候选指标**从快照里取**，而不是从 `MetricCatalog` 取。
+///
+/// 为什么：小组件是**独立 target**，`MetricCatalog` 属于手表 app target，
+/// 而且它依赖 HealthKit——小组件既不该也不需要 HealthKit 权限。
+/// 快照里已经带了每个指标的 id / 标题 / 图标，直接用就够了。
 struct MetricEntityQuery: EntityQuery {
 
     func entities(for identifiers: [String]) async throws -> [MetricEntity] {
-        identifiers.compactMap { id in
-            MetricCatalog.all.first { $0.id == id }.map(MetricEntity.init)
+        let items = SharedStore.readSnapshot().items
+        return identifiers.map { id in
+            if let item = items.first(where: { $0.metricID == id }) {
+                return MetricEntity(item)
+            }
+            // 快照里暂时没有这个指标（还没采到数据）时，退化成只显示 id
+            return MetricEntity(id: id, title: id, symbolName: "heart.fill")
         }
     }
 
-    /// 配置界面里默认展示的候选（只列默认开启的，避免列表过长）
+    /// 配置界面里默认展示的候选：当前快照里**有数据**的指标
     func suggestedEntities() async throws -> [MetricEntity] {
-        MetricCatalog.all.filter(\.enabledByDefault).map(MetricEntity.init)
+        SharedStore.readSnapshot().items.map(MetricEntity.init)
     }
 
     func defaultResult() async -> MetricEntity? {
-        MetricCatalog.all.first(where: { $0.id == "heart_rate" }).map(MetricEntity.init)
+        let items = SharedStore.readSnapshot().items
+        if let heartRate = items.first(where: { $0.metricID == "heart_rate" }) {
+            return MetricEntity(heartRate)
+        }
+        return items.first.map(MetricEntity.init)
     }
 }
 
 private extension MetricEntity {
-    init(_ descriptor: MetricDescriptor) {
-        self.init(id: descriptor.id, title: descriptor.title, symbolName: descriptor.symbolName)
+    init(_ item: LatestSnapshot.Item) {
+        self.init(id: item.metricID, title: item.title, symbolName: item.symbolName)
     }
 }
 
@@ -102,14 +121,14 @@ struct MetricTimelineProvider: AppIntentTimelineProvider {
 
     /// 在"添加小组件"的列表里预先给出几个常用指标，
     /// 用户不必先添加再进配置界面。
+    /// 同样从快照取（见上面 MetricEntityQuery 的说明）。
     func recommendations() -> [AppIntentRecommendation<SelectMetricIntent>] {
-        MetricCatalog.all
-            .filter(\.enabledByDefault)
+        SharedStore.readSnapshot().items
             .prefix(6)
-            .map { descriptor in
+            .map { item in
                 let intent = SelectMetricIntent()
-                intent.metric = MetricEntity(descriptor)
-                return AppIntentRecommendation(intent: intent, description: descriptor.title)
+                intent.metric = MetricEntity(item)
+                return AppIntentRecommendation(intent: intent, description: "\(item.title)")
             }
     }
 

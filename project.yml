@@ -14,7 +14,12 @@ options:
   createIntermediateGroups: true
   deploymentTarget:
     iOS: "18.0"
-    watchOS: "27.0"                     # ← 只支持 watchOS 27+（已确认）
+    # ⚠️ 这里写 26.0 而不是 27.0 是一个**构建机制上的妥协**，不是产品决策：
+    # GitHub runner 上是否有 watchOS 27 SDK 我们无法预先确定，如果这里硬写 27.0，
+    # 一旦 runner 只有 watchOS 26 SDK，xcodebuild 会在校验部署目标时**立刻失败**。
+    # 所以：项目基线设 26.0，CI 会探测实际 SDK 版本并用 WATCHOS_DEPLOYMENT_TARGET
+    # 覆盖成 27.x。deployment target 是"最低支持版本"，不影响在 watchOS 27 设备上运行。
+    watchOS: "26.0"
 
 settings:
   base:
@@ -71,6 +76,7 @@ targets:
       - path: watch/App
       - path: watch/Health
       - path: watch/Storage
+      - path: watch/Shared
       - path: watch/Upload
     info:
       path: watch/App/Info.plist
@@ -104,6 +110,11 @@ targets:
     platform: watchOS
     sources:
       - path: watch/Widget
+      # ⚠️ 小组件是**独立 target**，用到的共享类型必须显式加进来，
+      #    否则会报 "cannot find type ... in scope"（第一次 CI 就是这么挂的）。
+      #    watch/Shared 里只有 Foundation 依赖的代码（快照结构 + 读写工具），
+      #    **不含 HealthKit** —— 小组件本来就不该有 HealthKit 权限。
+      - path: watch/Shared
     info:
       # WidgetKit 扩展需要 Info.plist 里有嵌套的 NSExtension 字典，
       # 所以这里必须用 info.properties 显式写，不能用 INFOPLIST_KEY_ 构建设置。

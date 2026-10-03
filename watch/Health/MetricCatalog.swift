@@ -146,6 +146,13 @@ enum MetricCatalog {
         // 1. Apple 说 S12 提供「Recovery HRV」和「overall HRV」两个变体，
         //    **但没有说**它们是否分别对应 RMSSD 和 SDNN——所以两个类型都要读，然后对比；
         // 2. 官方文档这一页**只有符号声明、没有 Discussion**，写入频率完全未知。
+        //
+        // ⚠️ 编译门控：`heartRateVariabilityRMSSD` 这个常量只有 **watchOS 27 SDK** 里才有。
+        //    如果 CI 的 runner 装的是 Xcode 26（watchOS 26 SDK），这个符号不存在，
+        //    编译会直接报 "cannot find 'heartRateVariabilityRMSSD' in scope"。
+        //    所以用编译条件把它包起来，由 CI 探测到 watchOS 27 SDK 时才定义这个条件。
+        //    见 .github/workflows/build.yml 的「探测 watchOS SDK」步骤。
+        #if HAS_WATCHOS_27_SDK
         MetricDescriptor(
             id: "hrv_rmssd",
             title: "HRV (RMSSD)",
@@ -155,6 +162,7 @@ enum MetricCatalog {
             shape: .quantity(HKUnit.secondUnit(with: .milli), decimals: 0),
             enabledByDefault: true
         ),
+        #endif
 
         // ——— 呼吸 / 血氧 / 腕温 ———
         MetricDescriptor(

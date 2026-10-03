@@ -5,10 +5,8 @@ name: Build
 #   - 想打包上传 TestFlight 时，手动触发（Actions → Build → Run workflow → testflight）
 #
 # 关于 runner：
-#   macos-15 是当前（2026）GitHub 提供的 macOS runner 标签之一。
-#   第一次跑请先看「打印可用 Xcode」那一步的输出，确认镜像里有没有带
-#   watchOS 27 SDK 的 Xcode —— 如果没有，需要把 runs-on 换成已升级的镜像标签，
-#   或等 GitHub 更新镜像。
+#   第一次跑请看「打印可用 Xcode」的输出，确认镜像里有没有带 watchOS 27 SDK 的 Xcode。
+#   如果没有，需要换 runner 标签或等 GitHub 更新镜像。
 
 on:
   push:
@@ -21,6 +19,11 @@ on:
         type: choice
         options: [compile, testflight]
         default: compile
+
+# 编译失败时要把诊断信息发成 Issue，所以需要 issues: write
+permissions:
+  contents: read
+  issues: write
 
 jobs:
   # ============================================================
@@ -56,21 +59,105 @@ jobs:
       - name: 生成 Xcode 工程
         run: |
           xcodegen generate --spec project.yml
-          echo "=== 生成的 targets ==="
+          echo "=== 生成的 targets / schemes ==="
           xcodebuild -list -project AppleWatchHealth.xcodeproj
+
+      - name: 探测 watchOS SDK
+        id: sdk
+        run: |
+          SDK=$(xcodebuild -showsdks 2>/dev/null \
+            | grep -oE 'watchos[0-9]+(\.[0-9]+)?' \
+            | sed 's/watchos//' | sort -V | tail -1)
+          if [ -z "$SDK" ]; then
+            echo "没有找到任何 watchOS SDK"
+            xcodebuild -showsdks
+            exit 1
+          fi
+          MAJOR=${SDK%%.*}
+          echo "detected=$SDK" >> "$GITHUB_OUTPUT"
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+          echo "最高 watchOS SDK：$SDK（主版本 $MAJOR）"
 
       - name: 编译（CODE_SIGNING_ALLOWED=NO）
         id: build
         continue-on-error: true
         run: |
           set -o pipefail
+          SDK="${{ steps.sdk.outputs.detected }}"
+          MAJOR="${{ steps.sdk.outputs.major }}"
+          EXTRA=""
+          if [ "$MAJOR" -ge 27 ]; then
+            EXTRA="SWIFT_ACTIVE_COMPILATION_CONDITIONS=HAS_WATCHOS_27_SDK"
+            echo "检测到 watchOS $SDK SDK → 启用 RMSSD 指标"
+          else
+            echo "只有 watchOS $SDK SDK → 暂不启用 RMSSD 指标（该类型需要 watchOS 27 SDK）"
+          fi
           xcodebuild build \
             -project AppleWatchHealth.xcodeproj \
             -scheme "AppleWatchHealth" \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build/DerivedData \
+            WATCHOS_DEPLOYMENT_TARGET="$SDK" \
             CODE_SIGNING_ALLOWED=NO \
+            $EXTRA \
             2>&1 | tee build.log
+
+      # ------------------------------------------------------------
+      # 下面两步只在编译失败时跑：把诊断信息发成一个 Issue。
+      # Issue 是公开可读的，所以即使开发者没有 Mac、看不到设备日志，
+      # 也能远程（让 AI 助手）读出真实的编译错误。
+      # ------------------------------------------------------------
+      - name: 收集环境诊断
+        if: steps.build.outcome == 'failure'
+        run: |
+          {
+            echo "### Xcode 版本"
+            xcodebuild -version
+            echo ""
+            echo "### /Applications 下的 Xcode"
+            ls -d /Applications/Xcode*.app
+            echo ""
+            echo "### 可用 SDK"
+            xcodebuild -showsdks | grep -iE "watch|ios" || true
+            echo ""
+            echo "### 工程 targets / schemes"
+            xcodebuild -list -project AppleWatchHealth.xcodeproj || true
+          } > ci-env.txt
+
+      - name: 发布失败诊断到 Issue
+        if: steps.build.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "# CI 编译失败诊断"
+            echo ""
+            echo "- 运行编号：#${{ github.run_number }}（第 ${{ github.run_attempt }} 次尝试）"
+            echo "- 提交：\`${{ github.sha }}\`"
+            echo "- 运行日志：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo ""
+            echo "## 1. 环境"
+            echo ""
+            echo '```'
+            cat ci-env.txt
+            echo '```'
+            echo ""
+            echo "## 2. 编译错误（去重，最多 100 条）"
+            echo ""
+            echo '```'
+            grep -E "error: " build.log | sed 's|.*/SmileLife/||' | sort -u | head -n 100 || echo "（没有匹配到 error: ）"
+            echo '```'
+            echo ""
+            echo "## 3. 日志末尾 100 行"
+            echo ""
+            echo '```'
+            tail -n 100 build.log
+            echo '```'
+          } > ci-report.md
+
+          gh issue create \
+            --title "CI 编译失败：run #${{ github.run_number }}" \
+            --body-file ci-report.md
 
       - name: 提取错误摘要到 Job Summary
         if: always()
@@ -81,7 +168,7 @@ jobs:
             if [ -f build.log ]; then
               echo "### 错误（去重）"
               echo '```'
-              grep -E "error: " build.log | sed 's|.*/applewatch/||' | sort -u | head -n 80 || echo "（没有匹配到 error:）"
+              grep -E "error: " build.log | sed 's|.*/SmileLife/||' | sort -u | head -n 80 || echo "（没有匹配到 error:）"
               echo '```'
               echo "### 警告数量"
               echo '```'
@@ -103,7 +190,7 @@ jobs:
       - name: 编译是否通过
         if: steps.build.outcome == 'failure'
         run: |
-          echo "编译失败，请看上面的错误摘要或下载 build-log 产物。"
+          echo "编译失败。诊断信息已发成 Issue（仓库的 Issues 页签）。"
           exit 1
 
   # ============================================================
@@ -128,13 +215,13 @@ jobs:
         run: |
           missing=0
           for v in TEAM_ID ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY; do
-            if [ -z "${!v}" ]; then echo "❌ 缺少 secret: $v"; missing=1; fi
+            if [ -z "${!v}" ]; then echo "缺少 secret: $v"; missing=1; fi
           done
           if [ "$missing" = "1" ]; then
             echo "请先按 docs/无Mac打包部署指南.md 配置 Secrets。"
             exit 1
           fi
-          echo "✅ 密钥齐备"
+          echo "密钥齐备"
 
       - name: 选择最新 Xcode
         run: |

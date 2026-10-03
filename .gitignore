@@ -29,6 +29,9 @@ Package.resolved
 build.log
 archive.log
 export.log
+# 手动下载的 CI 日志/产物（不要入库）
+log/
+*.zip
 
 # ---- 密钥（绝对不要入库）----
 *.p8
