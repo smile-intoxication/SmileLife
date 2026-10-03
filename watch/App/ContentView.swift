@@ -11,7 +11,11 @@ struct ContentView: View {
     @State private var snapshot: LatestSnapshot = .empty
     @State private var status: SyncStatus = .unknown
     @State private var isSyncing = false
-    @State private var authDenied = false
+
+    // ⚠️ 这里**刻意没有** "未授权指标" 状态。
+    // HealthKit 的读权限是不可查询的（详见 HealthAuthorizer 里的说明），
+    // 任何基于 authorizationStatus(for:) 的判断都会变成"永远显示未授权"的假提示。
+    // 授权情况只能靠"有没有数据"间接体现，所以空态文案里把两种可能都讲清楚。
 
     var body: some View {
         List {
@@ -57,17 +61,9 @@ struct ContentView: View {
                 .disabled(isSyncing)
             }
 
-            if authDenied {
-                Section {
-                    Text("部分指标未授权。请在「设置 → 健康 → 数据访问」中开启。")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
         }
         .task { await bootstrap() }
     }
-
     // MARK: - 子视图
 
     private var emptyState: some View {
@@ -75,7 +71,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("还没有数据")
                     .font(.headline)
-                Text("下拉「立即同步」跑一次。\n后台自动同步需要你把本 app 的表盘小组件放到当前表盘上——这是 watchOS 的硬性要求。")
+                Text("点「立即同步」跑一次。\n\n如果一直没数据，两种可能：\n① 健康权限没开——去 iPhone 的「设置 → 健康 → 数据访问」检查；\n② 表盘上没有本 app 的小组件——watchOS 要求这样才给后台刷新额度。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -89,11 +85,9 @@ struct ContentView: View {
         do {
             try await HealthAuthorizer.shared.requestReadAuthorizationIfNeeded()
         } catch {
-            print("[UI] 授权失败：\(error.localizedDescription)")
+            // 后台调用时弹不出授权窗，这里失败是正常的，不当错误抛出
+            print("[UI] 授权请求未完成：\(error.localizedDescription)")
         }
-
-        let unauthorized = await HealthAuthorizer.shared.unauthorizedMetrics()
-        authDenied = !unauthorized.isEmpty
 
         // 前台打开时同步一次——这是后台被节流时的兜底
         await manualSync()

@@ -112,10 +112,12 @@ struct MetricTimelineProvider: AppIntentTimelineProvider {
     }
 
     func timeline(for configuration: SelectMetricIntent, in context: Context) async -> Timeline<SnapshotEntry> {
-        // 官方建议：timeline 条目间隔**至少约 5 分钟**；
-        // 表盘上的 complication 每天最多约 75 次刷新。
-        // 真正的即时更新靠主 app 主动调 `WidgetCenter.reloadAllTimelines()` 触发。
-        let next = Date().addingTimeInterval(15 * 60)
+        // ⚠️ 间隔要和表盘刷新预算对齐：官方口径 complication 每天最多约 40~75 次刷新。
+        //    15 分钟一轮 = 96 次/天，**已经超预算**，超出的会被系统丢弃，
+        //    反而让"多久更新一次"的预期落空。所以取 30 分钟（48 次/天），
+        //    真正需要即时更新时由主 app 在快照内容变化后调用
+        //    WidgetCenter.reloadAllTimelines() 主动触发。
+        let next = Date().addingTimeInterval(30 * 60)
         return Timeline(entries: [makeEntry(for: configuration)], policy: .after(next))
     }
 

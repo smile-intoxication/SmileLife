@@ -76,7 +76,7 @@ ios/                            iOS 极简占位 app
 | 2 | `project.yml` → iOS 的 `PRODUCT_BUNDLE_IDENTIFIER` | `com.smile.intoxication.applewatchhealth` |
 | 3 | `project.yml` → watch app 的 `PRODUCT_BUNDLE_IDENTIFIER` | `com.smile.intoxication.applewatchhealth.watchkitapp` |
 | 4 | `project.yml` → widget 的 `PRODUCT_BUNDLE_IDENTIFIER` | `com.smile.intoxication.applewatchhealth.watchkitapp.widget` |
-| 5 | `watch/WatchApp.entitlements`、`watch/Widget.entitlements`、`watch/Storage/SharedContainer.swift` 里的 App Group | `group.com.smile.intoxication.applewatchhealth` |
+| 5 | `watch/WatchApp.entitlements`、`watch/Widget.entitlements`、`watch/Shared/SharedContainer.swift` 里的 App Group | `group.com.smile.intoxication.applewatchhealth` |
 
 > ⚠️ **去开发者门户注册时，先试 `com.smile.intoxication.applewatchhealth`。**
 > App ID 是**全球唯一**的。如果连这个都被占用（可能性不大），告诉我，我一次替换上面 5 处。

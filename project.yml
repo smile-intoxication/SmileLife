@@ -39,10 +39,21 @@ targets:
     platform: iOS
     sources:
       - path: ios
+        excludes:
+          - PrivacyInfo.xcprivacy
+      # 隐私清单必须显式作为**资源**拷进 bundle 根目录
+      - path: ios/PrivacyInfo.xcprivacy
+        buildPhase: resources
     info:
       path: ios/Info.plist
       properties:
         CFBundleDisplayName: 健康数据
+        # ⚠️ 必须显式写成 $(...) 形式。XcodeGen 生成 Info.plist 时会把
+        #    CFBundleShortVersionString / CFBundleVersion 硬编码成**字面量** "1.0" / "1"，
+        #    不写这两行的话，改 MARKETING_VERSION 对产物**完全无效**——
+        #    现在恰好是 1.0/1 所以看不出来，等要发 1.1 时才会以「版本号未递增」的形式炸出来。
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -79,10 +90,17 @@ targets:
       - path: watch/Storage
       - path: watch/Shared
       - path: watch/Upload
+      # 隐私清单：本 target 用到 UserDefaults，必须声明 required reason（CA92.1）。
+      # Apple 原文：2024-05-01 起，未在隐私清单里声明 required reason API 的 app
+      # **不被 App Store Connect 接受**。
+      - path: watch/PrivacyInfo.xcprivacy
+        buildPhase: resources
     info:
       path: watch/App/Info.plist
       properties:
         CFBundleDisplayName: 健康数据
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         WKApplication: true
         WKCompanionAppBundleIdentifier: com.smile.intoxication.applewatchhealth
         WKRunsIndependentlyOfCompanionApp: true
@@ -111,17 +129,23 @@ targets:
     platform: watchOS
     sources:
       - path: watch/Widget
+        excludes:
+          - PrivacyInfo.xcprivacy
       # ⚠️ 小组件是**独立 target**，用到的共享类型必须显式加进来，
       #    否则会报 "cannot find type ... in scope"（第一次 CI 就是这么挂的）。
       #    watch/Shared 里只有 Foundation 依赖的代码（快照结构 + 读写工具），
       #    **不含 HealthKit** —— 小组件本来就不该有 HealthKit 权限。
       - path: watch/Shared
+      - path: watch/Widget/PrivacyInfo.xcprivacy
+        buildPhase: resources
     info:
       # WidgetKit 扩展需要 Info.plist 里有嵌套的 NSExtension 字典，
       # 所以这里必须用 info.properties 显式写，不能用 INFOPLIST_KEY_ 构建设置。
       path: watch/Widget/Info.plist
       properties:
         CFBundleDisplayName: 健康数据
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:

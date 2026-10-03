@@ -48,6 +48,10 @@ actor HealthSyncEngine {
 
         var status = SharedStore.readStatus()
         status.lastAttemptAt = .now
+        // 先把上一轮的错误清掉：否则一条早已自愈的旧错误会永远留在界面上常驻显示
+        status.lastError = nil
+        var roundErrors: [String] = []
+        var succeededMetrics = 0
 
         // 后台唤醒时给整轮同步设一个上限，留出时间写快照和回调 completion。
         // 官方只说"几秒"，这里取 8 秒，宁可少同步几个指标也不要被系统杀掉。
@@ -59,11 +63,12 @@ actor HealthSyncEngine {
                 break
             }
             do {
-                try await syncOne(metric)
+                try await syncOne(metric, deadline: deadline)
+                succeededMetrics += 1
             } catch {
                 // 单个指标失败不影响其它指标。锁屏读不到是最常见的原因。
                 print("[Sync] \(metric.id) 失败：\(error.localizedDescription)")
-                status.lastError = "\(metric.id): \(error.localizedDescription)"
+                roundErrors.append("\(metric.id): \(error.localizedDescription)")
             }
         }
 
@@ -75,10 +80,19 @@ actor HealthSyncEngine {
         if let removed = try? await store.enforceRetention(), removed > 0 {
             print("[Retention] 清理了 \(removed) 条超过 \(StoragePolicy.retentionDays) 天的样本")
         }
-        // 上传队列也设上限：按"不追求完整性"原则，满了丢最老的即可
-        _ = try? await store.trimUploadQueue()
+        // 上传队列也设上限：按"不追求完整性"原则，满了丢最老的即可。
+        // 但要**记下丢了多少** —— 上传还是 Noop，丢掉的都是"从没被尝试过"的条目。
+        if let dropped = try? await store.trimUploadQueue(), dropped > 0 {
+            print("[Upload] 队列满，丢弃最老 \(dropped) 条")
+        }
 
-        status.lastSuccessAt = .now
+        // ⚠️ 只有真的成功跑完至少一个指标才更新 lastSuccessAt。
+        // 否则「所有指标都因为锁屏而失败」时界面会显示"更新于 1 秒前"，
+        // 而这个字段的语义是"最后一次成功同步"——那会直接误导真机排查。
+        if succeededMetrics > 0 {
+            status.lastSuccessAt = .now
+        }
+        status.lastError = roundErrors.isEmpty ? nil : roundErrors.joined(separator: "; ")
         status.totalSamplesStored = (try? await store.totalCount()) ?? 0
         SharedStore.writeStatus(status)
         return status
@@ -92,8 +106,23 @@ actor HealthSyncEngine {
     /// 而不是按日期翻页。这样在心率密度暴涨时也不会一次把上万条样本拉进内存。
     private static let pageSize = 2_000
 
-    private func syncOne(_ metric: MetricDescriptor) async throws {
-        var anchor = try await store.anchor(for: metric.id)
+    /// 单个指标一轮最多翻多少页（防死循环 + 防一次吃光后台预算）。
+    /// 30 页 x 2000 条 = 单轮最多 6 万条，足够覆盖首次同步，也不会无限跑。
+    private static let maxPagesPerMetric = 30
+
+    private func syncOne(_ metric: MetricDescriptor, deadline: Date) async throws {
+        // ⚠️ 游标损坏时不要让它把这个指标永久卡死：清掉坏游标、按首次同步重来。
+        //    （锚点是 NSSecureCoding 存档，跨版本/损坏时会解档失败；
+        //      不处理的话每一轮都在第一行以同样方式失败，而且 lastError 只有单字段，
+        //      会被后面指标的报错覆盖掉，等于静默停摆。）
+        var anchor: HKQueryAnchor?
+        do {
+            anchor = try await store.anchor(for: metric.id)
+        } catch {
+            print("[Sync] \(metric.id) 游标损坏，清除后按首次同步重来：\(error.localizedDescription)")
+            try? await store.clearAnchor(for: metric.id)
+            anchor = nil
+        }
 
         // 首次同步（anchor 为空）限定回看窗口；有 anchor 时交给 HealthKit 做增量。
         let predicate: NSPredicate?
@@ -108,8 +137,18 @@ actor HealthSyncEngine {
 
         var totalNew = 0
         var shouldContinue = true
+        var page = 0
 
         while shouldContinue {
+            // ⚠️ 循环**内部**也要检查超时：只在指标之间检查的话，
+            //    首次同步心率（1 天最坏 17,280 条 ≈ 9 页）会把后台那几秒预算一次吃光，
+            //    被系统 SIGKILL 之后连 setTaskCompleted 都来不及回调，
+            //    系统随后会按退避算法收紧这个 app 的后台额度。
+            if Date() > deadline || Task.isCancelled {
+                print("[Sync] \(metric.id) 本轮时间用完，剩余页留到下次")
+                break
+            }
+
             let result = try await fetchIncremental(type: metric.sampleType,
                                                     predicate: predicate,
                                                     anchor: anchor,
@@ -138,6 +177,20 @@ actor HealthSyncEngine {
                     )
                 }
                 try await store.enqueue(pending)
+            }
+
+            // ⚠️ 防御：满页但**没有新游标**时，下一轮查询会和这一轮完全一样，
+            //    会无限重拉同一批 2000 行（每轮都 upsert + 入队，前后台都会卡死）。
+            //    Apple 文档保证正常路径上游标一定前进，但代码不该把"正常"当唯一可能。
+            if result.samples.count >= Self.pageSize && result.newAnchor == nil {
+                print("[Sync] \(metric.id) 满页但游标未前进，停止分页（防死循环）")
+                break
+            }
+
+            page += 1
+            if page >= Self.maxPagesPerMetric {
+                print("[Sync] \(metric.id) 达到单轮页数上限 \(Self.maxPagesPerMetric)，余下留到下次")
+                break
             }
 
             // 只有"拉满了"才说明后面可能还有，否则本轮结束。

@@ -64,6 +64,18 @@ actor HealthStore {
         return try NSKeyedUnarchiver.unarchivedObject(ofClass: HKQueryAnchor.self, from: data)
     }
 
+    /// 清掉某个指标的游标。
+    ///
+    /// 用途：`anchorData` 解档失败时（存档损坏 / 跨版本不兼容），如果不做处理，
+    /// 这个指标**每一轮同步都会在第一行以同样的方式失败**，等于永久静默停摆。
+    /// 清掉游标后退化成"首次同步"，代价只是重拉一次回看窗口内的数据 ——
+    /// 完全符合「不追求完整性」的原则。
+    func clearAnchor(for metricID: String) throws {
+        try modelContext.delete(model: SyncAnchorRecord.self,
+                                where: #Predicate { $0.metricID == metricID })
+        try modelContext.save()
+    }
+
     func saveAnchor(_ anchor: HKQueryAnchor, for metricID: String) throws {
         let data = try NSKeyedArchiver.archivedData(withRootObject: anchor, requiringSecureCoding: true)
         let existing = try modelContext.fetch(

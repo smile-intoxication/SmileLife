@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  App 隐私清单（Privacy Manifest）。watchOS 10+ / iOS 17+ 起必需。
+
+	  Apple 官方原文：
+	    "Starting May 1, 2024, apps that don't describe their use of required reason API
+	     in their privacy manifest file aren't accepted by App Store Connect."
+
+	  本 target 用到的 required reason API：
+	    UserDefaults —— HealthSyncEngine.isEnabled() 里用 UserDefaults.standard
+	                    读写「每个指标是否启用」这类**只属于本 app 自己**的配置。
+	                    对应原因代码 CA92.1。
+	  没有用到：File timestamp / System boot time / Disk space / Active keyboard 这几类。
+	-->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<!--
+	  本 app 不把任何数据传出设备：
+	    · 健康数据只写到手表本机的 SwiftData 库和 App Group 快照文件；
+	    · 上传通道（UploadTransport）当前是 Noop，什么都不发。
+	  所以按 Apple 的定义「collected」为空。
+	  ⚠️ 将来接入真实上传（服务器或手机端）时，这里必须如实补充所收集的数据类型。
+	-->
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<!-- 读取并写入仅本 app 自身可访问的用户偏好设置 -->
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

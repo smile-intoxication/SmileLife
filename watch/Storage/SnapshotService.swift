@@ -35,10 +35,18 @@ actor SnapshotService {
         let order = Dictionary(uniqueKeysWithValues: MetricCatalog.all.enumerated().map { ($1.id, $0) })
         items.sort { (order[$0.metricID] ?? .max) < (order[$1.metricID] ?? .max) }
 
+        // ⚠️ **内容没变就不写、也不要求刷新。**
+        // 表盘 complication 每天只有几十次刷新预算（官方口径约 40~75 次），
+        // 而后台每 15 分钟就会跑一轮同步 —— 无条件 reload 会在一天内要求近百次刷新，
+        // 超出的部分会被系统直接丢弃，反而削弱了"主动刷新"的效果。
+        // 注意不能拿 generatedAt 当判据（它每轮都变），只比 items。
+        guard items != SharedStore.readSnapshot().items else {
+            return
+        }
+
         SharedStore.writeSnapshot(LatestSnapshot(generatedAt: .now, items: items))
 
-        // 主动让表盘上的 complication 立刻刷新。
-        // 不调用的话，用户要等到下一个 timeline 条目（我们设的是 15 分钟）才能看到新数据。
+        // 内容真的变了，才让表盘上的 complication 立刻刷新。
         WidgetCenter.shared.reloadAllTimelines()
     }
 

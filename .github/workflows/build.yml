@@ -108,8 +108,15 @@ jobs:
       # 也能远程（让 AI 助手）读出真实的编译错误。
       # ------------------------------------------------------------
       - name: 收集环境诊断
-        if: steps.build.outcome == 'failure'
+        # ⚠️ 用 failure() 而不是 steps.build.outcome == 'failure'：
+        #    brew / xcode-select / xcodegen / SDK 探测 这些步骤也可能失败，
+        #    那时 steps.build 是 skipped 而不是 failure，诊断就完全不会跑
+        #    —— 而「runner 换镜像后没有 watchOS SDK」恰恰是最需要远程诊断的情况。
+        if: failure()
         run: |
+          # 前面的步骤失败时可能还没有 build.log，先建空的，免得后面二次失败
+          [ -f build.log ] || : > build.log
+          {
           {
             echo "### Xcode 版本"
             xcodebuild -version
@@ -125,7 +132,7 @@ jobs:
           } > ci-env.txt
 
       - name: 发布失败诊断到 Issue
-        if: steps.build.outcome == 'failure'
+        if: failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -244,6 +251,26 @@ jobs:
       - name: 生成工程
         run: xcodegen generate --spec project.yml
 
+      # ⚠️ compile job 里也有一段同样的探测。**两个 job 必须用同一套编译设置**，
+      #    否则会出现「CI 验证过的配置 ≠ 实际发货的配置」：
+      #    compile 定义了 HAS_WATCHOS_27_SDK（于是 RMSSD 指标被编译进去），
+      #    testflight 不定义（于是 RMSSD 进不了 TestFlight 包），而 compile 却是绿的。
+      - name: 探测 watchOS SDK
+        id: sdk
+        run: |
+          SDK=$(xcodebuild -showsdks 2>/dev/null \
+            | grep -oE 'watchos[0-9]+(\.[0-9]+)?' \
+            | sed 's/watchos//' | sort -V | tail -1)
+          if [ -z "$SDK" ]; then
+            echo "没有找到任何 watchOS SDK"
+            xcodebuild -showsdks
+            exit 1
+          fi
+          MAJOR=${SDK%%.*}
+          echo "detected=$SDK" >> "$GITHUB_OUTPUT"
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+          echo "最高 watchOS SDK：$SDK（主版本 $MAJOR）"
+
       - name: Archive
         env:
           TEAM_ID: ${{ secrets.TEAM_ID }}
@@ -251,14 +278,25 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
           set -o pipefail
+          SDK="${{ steps.sdk.outputs.detected }}"
+          MAJOR="${{ steps.sdk.outputs.major }}"
+          EXTRA=""
+          if [ "$MAJOR" -ge 27 ]; then
+            EXTRA="SWIFT_ACTIVE_COMPILATION_CONDITIONS=HAS_WATCHOS_27_SDK"
+            echo "检测到 watchOS $SDK SDK → 启用 RMSSD 指标"
+          else
+            echo "只有 watchOS $SDK SDK → 不启用 RMSSD 指标（需要 watchOS 27 SDK）"
+          fi
           xcodebuild archive \
             -project AppleWatchHealth.xcodeproj \
             -scheme "AppleWatchHealth" \
             -destination 'generic/platform=iOS' \
             -archivePath build/AppleWatchHealth.xcarchive \
             -derivedDataPath build/DerivedData \
+            WATCHOS_DEPLOYMENT_TARGET="$SDK" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
             CODE_SIGN_STYLE=Automatic \
+            $EXTRA \
             -allowProvisioningUpdates \
             -authenticationKeyPath ~/private_keys/AuthKey_${ASC_KEY_ID}.p8 \
             -authenticationKeyID "$ASC_KEY_ID" \
@@ -282,12 +320,18 @@ jobs:
             -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
             2>&1 | tee export.log
 
-      - name: 上传 .ipa 作为可下载产物
+      - name: 上传导出目录内容
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ipa
-          path: build/export/*.ipa
-          if-no-files-found: error
+          name: export
+          # ⚠️ 这里**不能**用 if-no-files-found: error。
+          #    ExportOptions.plist 里是 destination=upload，xcodebuild 会**直接上传**
+          #    到 App Store Connect，不会在 build/export/ 留下 .ipa。
+          #    用 error 的话会出现「TestFlight 上传成功了，但 job 变红」这种最坏的信号。
+          #    想要可下载的 .ipa，需要另跑一次 -exportArchive（destination=export）。
+          path: build/export/
+          if-no-files-found: warn
 
       - name: 上传过程日志
         if: always()

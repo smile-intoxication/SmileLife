@@ -32,8 +32,13 @@ final class WatchServices {
         do {
             container = try ModelContainer(for: schema, configurations: [configuration])
         } catch {
-            // 本地库建不起来说明 Schema 迁移出了问题，属于开发期错误，直接暴露
-            fatalError("无法创建 ModelContainer: \(error)")
+            // ⚠️ 刻意**不用 fatalError**。
+            // 本地库是文件型且随 app 版本演进（加模型 / 加字段 / 加减 #Index 都可能让
+            // 轻量迁移失败），一旦失败就是「每次冷启动都崩」，用户只能重装才能恢复。
+            // 而这里的数据本来就是 7 天可丢的（StoragePolicy.retentionDays = 7），
+            // 按已确认的「不追求完整性」原则，没有任何理由为它把整个 app 拖死。
+            print("[Store] ⚠️ ModelContainer 创建失败，尝试自愈：\(error)")
+            container = Self.recoverContainer(schema: schema, configuration: configuration)
         }
 
         // 把实际落盘位置打出来：真机上可以直接在 Console 里确认
@@ -45,5 +50,32 @@ final class WatchServices {
         store = HealthStore(modelContainer: container)
         snapshotService = SnapshotService(store: store)
         syncEngine = HealthSyncEngine(store: store, snapshotService: snapshotService)
+    }
+
+    /// 本地库自愈：删掉旧 store 重建一次；仍然失败就退化成**内存库**。
+    ///
+    /// 取舍：内存库不持久化，但 app 仍然可用（数据每次从 HealthKit 重新拉），
+    /// 比"每次启动都崩、用户只能重装"好得多。
+    private static func recoverContainer(schema: Schema,
+                                         configuration: ModelConfiguration) -> ModelContainer {
+        // 1) 删掉可能损坏/迁移失败的旧文件（含 SQLite 的 -shm / -wal 边车文件）
+        let basePath = configuration.url.path
+        for suffix in ["", "-shm", "-wal"] {
+            try? FileManager.default.removeItem(atPath: basePath + suffix)
+        }
+        if let fresh = try? ModelContainer(for: schema, configurations: [configuration]) {
+            print("[Store] 自愈成功：已用全新的本地库（旧数据已丢弃，HealthKit 里还有原件）")
+            return fresh
+        }
+
+        // 2) 兜底：内存库
+        let memoryConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        if let memory = try? ModelContainer(for: schema, configurations: [memoryConfiguration]) {
+            print("[Store] ⚠️ 退化为内存库：本次运行数据不落盘，重启即丢")
+            return memory
+        }
+
+        // 3) 连内存库都建不起来，说明 Schema 本身有硬错误——这时崩掉才能暴露问题
+        fatalError("ModelContainer 彻底无法创建（内存库也失败），Schema 定义可能有误")
     }
 }

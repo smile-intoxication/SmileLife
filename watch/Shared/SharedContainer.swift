@@ -32,7 +32,7 @@ enum SharedContainer {
 /// 写进共享容器的快照。**保持字段少而稳定**——小组件与主 app 可能不同版本共存。
 struct LatestSnapshot: Codable {
 
-    struct Item: Codable, Identifiable {
+    struct Item: Codable, Identifiable, Equatable {
         var id: String { metricID }
         var metricID: String
         var title: String
@@ -87,23 +87,49 @@ enum SharedStore {
         return d
     }()
 
-    /// 原子写入：先写临时文件再 replace，避免小组件读到写了一半的文件。
+    /// 原子写入。
+    ///
+    /// ⚠️ **不要用 `FileManager.replaceItemAt`** —— 它的语义是「替换**已存在**的项」
+    /// （参数名就叫 `originalItemURL`，且默认要继承原项的 creationDate/permissions），
+    /// 首次运行时 `latest-snapshot.json` 根本不存在，会直接抛错；
+    /// 一旦被 `try?` 吞掉，目标文件就**永远创建不出来**，之后每次写入都在同一处失败
+    /// —— 表现是小组件永远显示 `--`、主界面永远「还没有数据」，而且没有任何报错。
+    ///
+    /// `Data.write(options: .atomic)` 本身就是「同目录临时文件 + rename」，
+    /// 目标不存在会创建、存在则原子替换，正是我们需要的语义。
     private static func write<T: Encodable>(_ value: T, to url: URL?) {
-        guard let url else { return }
+        guard let url else {
+            print("[SharedStore] ⚠️ App Group 容器不可用（containerURL 返回 nil）——"
+                  + "检查 entitlements 里的 App Group 与 SharedContainer.appGroupID 是否一致")
+            return
+        }
         do {
             let data = try encoder.encode(value)
-            let tmp = url.appendingPathExtension("tmp")
-            try data.write(to: tmp, options: .atomic)
-            _ = try? FileManager.default.replaceItemAt(url, withItemAt: tmp)
+            try data.write(to: url, options: .atomic)
         } catch {
-            // 共享容器写失败不应让同步流程崩溃——下次再来
-            print("[SharedStore] write failed: \(error)")
+            // 共享容器写失败不应让同步流程崩溃——下次再来。
+            // 但**必须留下日志**：这是「没数据」和「写不进去」唯一能区分的地方。
+            print("[SharedStore] ⚠️ 写入失败 \(url.lastPathComponent): \(error)")
         }
     }
 
     private static func read<T: Decodable>(_ type: T.Type, from url: URL?) -> T? {
-        guard let url, let data = try? Data(contentsOf: url) else { return nil }
-        return try? decoder.decode(type, from: data)
+        guard let url else {
+            print("[SharedStore] ⚠️ App Group 容器不可用，读不到 \(T.self)")
+            return nil
+        }
+        guard let data = try? Data(contentsOf: url) else {
+            // 文件还不存在是**正常情况**（第一次同步之前），不当错误
+            return nil
+        }
+        do {
+            return try decoder.decode(type, from: data)
+        } catch {
+            // 「文件不存在」和「存在但解码失败」必须区分开：
+            // 后者通常意味着新旧版本字段不兼容，是最难查的一类问题。
+            print("[SharedStore] ⚠️ 解码失败 \(url.lastPathComponent): \(error)")
+            return nil
+        }
     }
 
     static func writeSnapshot(_ snapshot: LatestSnapshot) {

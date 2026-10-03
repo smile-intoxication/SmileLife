@@ -29,9 +29,18 @@ actor HealthAuthorizer {
         await withCheckedContinuation { cont in
             healthStore.getRequestStatusForAuthorization(toShare: [], read: MetricCatalog.readTypes) { status, _ in
                 switch status {
-                case .unnecessary:      cont.resume(returning: true)
-                case .shouldRequest:    cont.resume(returning: false)
-                default:                cont.resume(returning: true)
+                case .unnecessary:
+                    cont.resume(returning: true)
+                case .shouldRequest:
+                    cont.resume(returning: false)
+                default:
+                    // ⚠️ `.unknown` 也当成「还没问过」。
+                    // 这是全 app **唯一**会弹授权窗的入口：如果这里把 .unknown 当成
+                    // 「已问过」而跳过，用户就永远看不到授权弹窗、也永远拿不到数据，
+                    // 而且界面上没有任何补救路径。
+                    // 反过来误判的代价很小：后台调用时 requestAuthorization 会静默失败，
+                    // 我们在 catch 里吞掉即可（后台本来就弹不出窗）。
+                    cont.resume(returning: false)
                 }
             }
         }
@@ -44,20 +53,19 @@ actor HealthAuthorizer {
         try await requestReadAuthorization()
     }
 
-    /// 逐类型查询授权状态。
-    ///
-    /// 注意 `authorizationStatus(for:)` **只能判断"是否已授权"**，
-    /// 出于隐私设计，HealthKit **不会告诉你用户拒绝的是"读"还是"写"**，
-    /// 也不能据此判断"有没有数据"。真正判断有没有数据要靠查询结果。
-    func status(for metric: MetricDescriptor) -> HKAuthorizationStatus {
-        healthStore.authorizationStatus(for: metric.sampleType)
-    }
-
-    /// 哪些指标当前是「未授权」的，用于 UI 上给出精确提示
-    /// （比笼统说"没权限"友好得多）。
-    func unauthorizedMetrics() -> [MetricDescriptor] {
-        MetricCatalog.all.filter { status(for: $0) == .notDetermined || status(for: $0) == .sharingDenied }
-    }
+    // MARK: - ⚠️ 关于「判断读授权」的一个陷阱
+    //
+    // **不要**用 `HKHealthStore.authorizationStatus(for:)` 判断"读权限有没有拿到"。
+    //
+    // Apple 的设计是：**读权限是不可查询的** —— 出于隐私，app 无法知道用户是否拒绝了读。
+    // `authorizationStatus(for:)` 返回的是**写入（sharing）**授权状态，
+    // 而本 app 的 `toShare` 恒为空集，所以它对每个类型都会返回 `.sharingDenied` 之类，
+    // 与"用户是否允许读"毫无关系。
+    //
+    // 曾经的实现 `unauthorizedMetrics()` 正是踩了这个坑：
+    // 结果是主界面**永远**显示"部分指标未授权"，而且这个提示永远不会消失。
+    // 已删除。正确做法是**用查询结果反推**（查不到样本时，"没数据"和"没授权"
+    // 两种情况在界面上如实并列说明），见 ContentView 的空态文案。
 }
 
 enum HealthAuthError: LocalizedError {

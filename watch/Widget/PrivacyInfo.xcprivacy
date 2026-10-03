@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  小组件扩展的隐私清单。
+	  它只读 App Group 里的 JSON 快照文件，**不查 HealthKit、不用 UserDefaults**，
+	  因此 NSPrivacyAccessedAPITypes 为空。
+	  保留这个文件是为了让 App Store Connect 的自动检查在每个可执行文件里都能找到清单。
+	-->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array/>
+</dict>
+</plist>
