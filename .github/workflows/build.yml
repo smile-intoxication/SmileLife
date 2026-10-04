@@ -502,13 +502,38 @@ jobs:
               echo ""
             } >> sign-hints.md
           fi
-          if grep -qE "No signing certificate|no profiles for|requires a provisioning profile" archive.log export.log 2>/dev/null; then
+          if grep -q "Cloud signing permission error" archive.log export.log 2>/dev/null; then
+            {
+              echo "## 🔎 识别到：API Key 没有「云端分发签名」权限"
+              echo ""
+              echo "**注意这已经是好消息了** —— archive 阶段是 \`** ARCHIVE SUCCEEDED **\`，"
+              echo "说明 entitlements / App Group / HealthKit 的配置**全部正确**，"
+              echo "开发证书也创建成功了（\`Apple Development: Created via API\`）。"
+              echo ""
+              echo "卡住的是 **export**：它需要**分发**证书，而"
+              echo "cloud-managed **distribution** certificate 要求 **Admin 角色**的 Team Key，"
+              echo "App Manager 不够。（依据：Apple 开发者论坛 thread 810658 / 698117）"
+              echo ""
+              echo "**修法**："
+              echo ""
+              echo "1. 打开 appstoreconnect.apple.com → **Users and Access** → **Integrations**"
+              echo "2. 确认你在 **Team Keys** 标签页，**不是 Individual Keys**"
+              echo "   —— 个人密钥（Individual Keys）**完全不支持**云端签名"
+              echo "3. 新建一个 key，**Access / Role 选 Admin**（不是 App Manager）→ Generate → **下载 .p8**"
+              echo "   （.p8 只能下载一次）"
+              echo "4. 更新 GitHub Secrets：\`ASC_KEY_ID\` 和 \`ASC_PRIVATE_KEY\`"
+              echo "   \`ASC_ISSUER_ID\` 和 \`TEAM_ID\` **不用改** —— Issuer ID 是团队级的，不随 key 变"
+              echo "5. 重跑 workflow"
+              echo ""
+            } >> sign-hints.md
+          fi
+          if grep -qE "No signing certificate|requires a provisioning profile" archive.log export.log 2>/dev/null; then
             {
               echo "## 🔎 识别到：签名证书 / 描述文件缺失"
               echo ""
               echo "多半是 **App Store Connect API Key 权限不够**。"
-              echo "去 appstoreconnect.apple.com → Users and Access → Integrations → Team Keys，"
-              echo "确认它的角色是 **App Manager** 或 Admin。"
+              echo "去 appstoreconnect.apple.com → Users and Access → Integrations → **Team Keys**，"
+              echo "确认它**是 Team Key** 且角色是 **Admin**。"
               echo ""
             } >> sign-hints.md
           fi
