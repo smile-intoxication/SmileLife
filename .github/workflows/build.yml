@@ -2,7 +2,10 @@ name: Build
 
 # 用法：
 #   - push 到 main 会自动跑「编译检查」（不需要签名、不需要任何密钥）
-#   - 想打包上传 TestFlight 时，手动触发（Actions → Build → Run workflow → testflight）
+#   - 想打包上传 TestFlight 时，二选一：
+#       a) Actions → Build → Run workflow → mode 选 testflight
+#       b) 推一个 v* 的 tag（例如 `git tag v1.0 && git push origin v1.0`）
+#     (b) 是为了让助手也能触发上传——workflow_dispatch 需要 API token，助手没有。
 #
 # 关于 runner：
 #   第一次跑请看「打印可用 Xcode」的输出，确认镜像里有没有带 watchOS 27 SDK 的 Xcode。
@@ -11,6 +14,7 @@ name: Build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -32,7 +36,7 @@ jobs:
   compile:
     name: 编译检查（跳过签名）
     runs-on: macos-15
-    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'compile'
+    if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'compile') && !startsWith(github.ref, 'refs/tags/')
 
     steps:
       - uses: actions/checkout@v4
@@ -303,7 +307,8 @@ jobs:
   testflight:
     name: 打包并上传 TestFlight
     runs-on: macos-15
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'testflight'
+    # 手动触发（mode=testflight）或推 v* tag —— 后者让助手也能触发上传
+    if: (github.event_name == 'workflow_dispatch' && inputs.mode == 'testflight') || startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - uses: actions/checkout@v4
@@ -441,3 +446,123 @@ jobs:
             archive.log
             export.log
           if-no-files-found: warn
+
+      # ------------------------------------------------------------
+      # 签名失败诊断。
+      # compile job 一直有诊断，但 testflight job **之前没有** ——
+      # 后果是 run #8 失败时仓库里连 Issue 都没有，只能靠人肉下载 artifact。
+      # 在"开发者没有 Mac、看不到日志"这个前提下，这是致命的。
+      # ------------------------------------------------------------
+      - name: 收集签名诊断
+        if: failure()
+        run: |
+          set +e
+          [ -f archive.log ] || echo "（没有 archive.log：失败发生在 archive 之前）" > archive.log
+          [ -f export.log ]  || echo "（没有 export.log：失败发生在导出之前）" > export.log
+
+          # ——— 原始信息（会被放进代码块里）———
+          {
+            echo "### Xcode 版本"
+            xcodebuild -version
+            echo ""
+            echo "### 可用 SDK"
+            xcodebuild -showsdks | grep -iE "watch|ios"
+            echo ""
+            echo "### archive.log 里的 error"
+            grep -E "error: " archive.log
+            echo ""
+            echo "### export.log 里的 error"
+            grep -E "error: " export.log
+          } > sign-env.txt 2>&1
+
+          # ——— 把 Apple 的原始报错翻译成"该去点哪里" ———
+          # 单独放一个 .md（不套代码块），这样在 Issue 里能正常渲染。
+          : > sign-hints.md
+          if grep -q "doesn't match the entitlements file's value for the com.apple.security.application-groups" archive.log export.log 2>/dev/null; then
+            {
+              echo "## 🔎 识别到：App Group 没有在开发者门户里配好"
+              echo ""
+              echo "**报错**（provisioning profile 里没有 App Groups 能力，"
+              echo "而 watch app / widget 的 entitlements 都要求了它。"
+              echo "自动签名无法给一个「账户里不存在」的 App Group 生成描述文件）："
+              echo ""
+              echo '```'
+              grep -h "doesn't match the entitlements" archive.log export.log | sort -u
+              echo '```'
+              echo ""
+              echo "**修法（只能网页操作，改完重跑本 workflow，不需要改代码）**："
+              echo ""
+              echo "1. 打开 developer.apple.com/account → **Certificates, Identifiers & Profiles** → **Identifiers**"
+              echo "2. 确认 **App Groups** 里已注册 \`group.com.smile.intoxication.applewatchhealth\`（没有就 ＋ 新建）"
+              echo "3. 逐个打开下面**两个 App ID**（列表里没有就 ＋ 新建 App IDs），"
+              echo "   勾上 **App Groups** → **Configure** → 选中上面那个 group → **Save**："
+              echo "   - \`com.smile.intoxication.applewatchhealth.watchkitapp\`"
+              echo "   - \`com.smile.intoxication.applewatchhealth.watchkitapp.widget\`"
+              echo "4. 顺手确认 watch app 那个 App ID 也勾了 **HealthKit**"
+              echo ""
+            } >> sign-hints.md
+          fi
+          if grep -qE "No signing certificate|no profiles for|requires a provisioning profile" archive.log export.log 2>/dev/null; then
+            {
+              echo "## 🔎 识别到：签名证书 / 描述文件缺失"
+              echo ""
+              echo "多半是 **App Store Connect API Key 权限不够**。"
+              echo "去 appstoreconnect.apple.com → Users and Access → Integrations → Team Keys，"
+              echo "确认它的角色是 **App Manager** 或 Admin。"
+              echo ""
+            } >> sign-hints.md
+          fi
+          if grep -q "suitable application records" archive.log export.log 2>/dev/null; then
+            {
+              echo "## 🔎 识别到：App Store Connect 里还没有这个 App 记录"
+              echo ""
+              echo "去 appstoreconnect.apple.com → **My Apps** → ＋ → **New App**，"
+              echo "Bundle ID 选 \`com.smile.intoxication.applewatchhealth\`。"
+              echo ""
+            } >> sign-hints.md
+          fi
+
+          echo "签名诊断已写入 sign-env.txt / sign-hints.md"
+
+      - name: 发布失败诊断到 Issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          [ -f sign-env.txt ]   || echo "（签名诊断步骤没有生成 sign-env.txt）" > sign-env.txt
+          [ -f sign-hints.md ]  || : > sign-hints.md
+
+          {
+            echo "# TestFlight 打包失败诊断"
+            echo ""
+            echo "- 运行编号：#${{ github.run_number }}（第 ${{ github.run_attempt }} 次尝试）"
+            echo "- 提交：\`${{ github.sha }}\`"
+            echo "- 运行日志：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo ""
+            cat sign-hints.md
+            echo "## 1. 环境与 error"
+            echo ""
+            echo '```'
+            cat sign-env.txt
+            echo '```'
+            echo ""
+            echo "## 2. archive.log 末尾 40 行"
+            echo ""
+            echo '```'
+            tail -n 40 archive.log
+            echo '```'
+            echo ""
+            echo "## 3. export.log 末尾 40 行"
+            echo ""
+            echo '```'
+            tail -n 40 export.log
+            echo '```'
+          } > sign-report.md
+          head -c 60000 sign-report.md > sign-report.trimmed.md
+
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "TestFlight 打包失败：run #${{ github.run_number }}" \
+            --body-file sign-report.trimmed.md \
+            || echo "⚠️ 建 Issue 失败（可能缺 issues:write 权限），详情见 job 的 Job Summary"
