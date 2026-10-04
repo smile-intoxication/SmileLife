@@ -156,7 +156,14 @@ fi
 
 # required-reason API 守卫：用了就必须在隐私清单里声明，否则 App Store Connect 直接拦。
 # FileTimestamp 这一类最容易被顺手用上（读文件大小/时间就会碰到）。
-if grep -rq 'attributesOfItem' watch ios --include='*.swift' 2>/dev/null; then
+#
+# ⚠️ 必须先**逐文件去掉注释**再判断 —— 否则解释「为什么不能用它」的注释
+#    自己就会命中（这个守卫第一版就是这么误报的）。`code_only` 一次只吃一个文件，
+#    所以这里先把命中的文件列出来，再逐个过滤。
+REQ_HIT=$(for f in $(grep -rl 'attributesOfItem' watch ios --include='*.swift' 2>/dev/null); do
+            code_only "$f"
+          done | grep -c 'attributesOfItem')
+if [ "$REQ_HIT" -gt 0 ]; then
   bad "代码里用了 FileManager.attributesOfItem —— 那是 required-reason API（FileTimestamp 类别），必须在 PrivacyInfo.xcprivacy 里声明才能过审"
 else
   ok "没有用 attributesOfItem（文件大小走 FileHandle.seekToEnd，不碰 required-reason API）"
