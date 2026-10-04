@@ -95,13 +95,14 @@ jobs:
           set -o pipefail
           SDK="${{ steps.sdk.outputs.detected }}"
           MAJOR="${{ steps.sdk.outputs.major }}"
-          EXTRA=""
-          if [ "$MAJOR" -ge 27 ]; then
-            EXTRA="SWIFT_ACTIVE_COMPILATION_CONDITIONS=HAS_WATCHOS_27_SDK"
-            echo "检测到 watchOS $SDK SDK → 启用 RMSSD 指标"
-          else
-            echo "只有 watchOS $SDK SDK → 暂不启用 RMSSD 指标（该类型需要 watchOS 27 SDK）"
-          fi
+          # ⚠️ 这里**刻意不再**根据 SDK 版本定义 HAS_WATCHOS_27_SDK 之类的编译条件。
+          #    原因：那种做法会造成「CI 验证过的配置 ≠ 实际发货的配置」——
+          #    RMSSD 曾经就被 #if HAS_WATCHOS_27_SDK 门控，而 CI 上从未成立，
+          #    于是它**从来没被编译进去过**，却一直是绿的。
+          #    现在 watchOS 27 专属类型改用原始字符串构造（见 MetricCatalog.rmssdIdentifier），
+          #    老 SDK 也能编译、新系统上运行时可用 —— 不再需要任何编译条件。
+          #    代价是写错字符串不会编译报错，所以自检脚本会守住这一点。
+          echo "watchOS SDK：$SDK（主版本 $MAJOR）"
           xcodebuild build \
             -project AppleWatchHealth.xcodeproj \
             -scheme "AppleWatchHealth" \
@@ -109,7 +110,6 @@ jobs:
             -derivedDataPath build/DerivedData \
             WATCHOS_DEPLOYMENT_TARGET="$SDK" \
             CODE_SIGNING_ALLOWED=NO \
-            $EXTRA \
             2>&1 | tee build.log
 
       # ------------------------------------------------------------
@@ -355,10 +355,10 @@ jobs:
       - name: 生成工程
         run: xcodegen generate --spec project.yml
 
-      # ⚠️ compile job 里也有一段同样的探测。**两个 job 必须用同一套编译设置**，
-      #    否则会出现「CI 验证过的配置 ≠ 实际发货的配置」：
-      #    compile 定义了 HAS_WATCHOS_27_SDK（于是 RMSSD 指标被编译进去），
-      #    testflight 不定义（于是 RMSSD 进不了 TestFlight 包），而 compile 却是绿的。
+      # ⚠️ compile job 里也有一段同样的探测。两个 job 必须用同一套编译设置，
+      #    否则会出现「CI 验证过的配置 ≠ 实际发货的配置」。
+      #    （历史教训：RMSSD 曾被 #if HAS_WATCHOS_27_SDK 门控，而那个条件在 CI 上
+      #      从未成立，于是它从没被编进任何产物，却一直是绿的。现在不再需要编译条件。）
       - name: 探测 watchOS SDK
         id: sdk
         run: |
@@ -383,14 +383,7 @@ jobs:
         run: |
           set -o pipefail
           SDK="${{ steps.sdk.outputs.detected }}"
-          MAJOR="${{ steps.sdk.outputs.major }}"
-          EXTRA=""
-          if [ "$MAJOR" -ge 27 ]; then
-            EXTRA="SWIFT_ACTIVE_COMPILATION_CONDITIONS=HAS_WATCHOS_27_SDK"
-            echo "检测到 watchOS $SDK SDK → 启用 RMSSD 指标"
-          else
-            echo "只有 watchOS $SDK SDK → 不启用 RMSSD 指标（需要 watchOS 27 SDK）"
-          fi
+          echo "watchOS SDK：$SDK"
           xcodebuild archive \
             -project AppleWatchHealth.xcodeproj \
             -scheme "AppleWatchHealth" \
@@ -400,7 +393,6 @@ jobs:
             WATCHOS_DEPLOYMENT_TARGET="$SDK" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
             CODE_SIGN_STYLE=Automatic \
-            $EXTRA \
             -allowProvisioningUpdates \
             -authenticationKeyPath ~/private_keys/AuthKey_${ASC_KEY_ID}.p8 \
             -authenticationKeyID "$ASC_KEY_ID" \

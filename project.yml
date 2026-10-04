@@ -47,7 +47,7 @@ targets:
     info:
       path: ios/Info.plist
       properties:
-        CFBundleDisplayName: 健康数据
+        CFBundleDisplayName: 长明护心
         # ⚠️ 必须显式写成 $(...) 形式。XcodeGen 生成 Info.plist 时会把
         #    CFBundleShortVersionString / CFBundleVersion 硬编码成**字面量** "1.0" / "1"，
         #    不写这两行的话，改 MARKETING_VERSION 对产物**完全无效**——
@@ -106,7 +106,7 @@ targets:
     info:
       path: watch/App/Info.plist
       properties:
-        CFBundleDisplayName: 健康数据
+        CFBundleDisplayName: 长明护心
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         WKApplication: true
@@ -154,7 +154,7 @@ targets:
       # 所以这里必须用 info.properties 显式写，不能用 INFOPLIST_KEY_ 构建设置。
       path: watch/Widget/Info.plist
       properties:
-        CFBundleDisplayName: 健康数据
+        CFBundleDisplayName: 长明护心
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSExtension:

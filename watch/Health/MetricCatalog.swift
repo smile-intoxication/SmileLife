@@ -99,38 +99,41 @@ enum MetricCatalog {
 
     // MARK: - v1 指标清单
 
-    /// watchOS 27 才有的指标；**老 SDK 上返回空数组**。
+    /// watchOS 27 才有的类型 —— **用原始字符串构造，不引用 Swift 符号**。
     ///
-    /// ⚠️ 为什么单独抽成一个属性，而不是直接写在 `all` 数组里：
-    /// **Swift 不允许在数组字面量里写 `#if`** —— `#if` 是「声明」，
-    /// 而数组元素位置需要「表达式」，会报
-    /// `expected expression in container literal`，
-    /// 并且引发几十条级联语法错误（CI 第二轮就是这么挂的）。
-    /// `#if` 只能包在声明外面，所以这里用一个计算属性承载。
+    /// ⚠️ 为什么必须这样（这是一个真踩过的坑）：
+    /// `HKQuantityTypeIdentifier.heartRateVariabilityRMSSD` 这个**符号只存在于 watchOS 27 SDK**，
+    /// 而 CI runner 目前只有 watchOS 26.2 SDK。直接写符号就编译不过，
+    /// 于是之前只能在 `#if HAS_WATCHOS_27_SDK` 里门控 ——
+    /// 而那个条件**在 CI 上从未成立**，结果就是 **RMSSD 从来就没被编译进去过**。
     ///
-    /// `HAS_WATCHOS_27_SDK` 由 CI 探测 watchOS SDK 版本后决定是否定义，
-    /// 见 `.github/workflows/build.yml` 的「探测 watchOS SDK」步骤。
+    /// `HKQuantityTypeIdentifier` 是 ObjC 的 `NS_TYPED_ENUM`，Swift 里就是一个
+    /// `RawRepresentable` 结构体，`rawValue` 就是 ObjC 常量名。所以用原始字符串构造：
+    /// 在**老 SDK 上照样能编译**，在 watchOS 27 设备上**运行时能拿到真类型**。
+    ///
+    /// 代价：字符串写错**不会编译报错**，只会让 `quantityType(forIdentifier:)` 返回 nil。
+    /// 所以下面**绝不强制解包**，拿不到就跳过该指标（诊断界面会把它标成「不可用」）。
+    static let rmssdIdentifier = HKQuantityTypeIdentifier(
+        rawValue: "HKQuantityTypeIdentifierHeartRateVariabilityRMSSD"
+    )
+
     private static var watchOS27Metrics: [MetricDescriptor] {
-        #if HAS_WATCHOS_27_SDK
+        // 拿不到类型就静默跳过：不崩、不影响其它指标。
+        // 这同时也是一个**运行时探针**——watchOS 27 设备上它应该能拿到。
+        guard let rmssd = HKQuantityType.quantityType(forIdentifier: rmssdIdentifier) else {
+            return []
+        }
         return [
-            // 🆕 S12/Ultra 4 的新电学心率传感器让高频 HRV 成为可能。
-            // ⚠️ 两个未解问题，必须真机验证：
-            // 1. Apple 说 S12 提供「Recovery HRV」和「overall HRV」两个变体，
-            //    但**没有说**它们是否分别对应 RMSSD 和 SDNN —— 所以两个类型都要读、再对比；
-            // 2. 官方文档这一页**只有符号声明、没有 Discussion**，写入频率完全未知。
             MetricDescriptor(
                 id: "hrv_rmssd",
                 title: "HRV (RMSSD)",
                 unitSuffix: "ms",
                 symbolName: "waveform.path.ecg.rectangle",
-                sampleType: q(.heartRateVariabilityRMSSD)!,
+                sampleType: rmssd,
                 shape: .quantity(HKUnit.secondUnit(with: .milli), decimals: 0),
                 enabledByDefault: true
             )
         ]
-        #else
-        return []
-        #endif
     }
 
     /// v1 只收「Apple Watch 独有产生」的指标 —— 这些才是手表端真正该负责的数据。

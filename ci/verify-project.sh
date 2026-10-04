@@ -256,6 +256,43 @@ grep -q -- '- path: watch/Assets.xcassets' project.yml \
   && ok "watch/Assets.xcassets 已接进 watch target" \
   || bad "project.yml 没有引用 watch/Assets.xcassets"
 
+# ---------- 10. 显示名 / watchOS 27 专属类型的取用方式 ----------
+section "10. 显示名与 watchOS 27 类型"
+NAME_COUNT=$(grep -c 'CFBundleDisplayName: 长明护心' project.yml)
+if [ "$NAME_COUNT" -eq 3 ]; then
+  ok "三个 target 的 CFBundleDisplayName 都是「长明护心」"
+else
+  bad "CFBundleDisplayName 为「长明护心」的 target 只有 $NAME_COUNT 个（应为 3：iOS / watch / widget）"
+fi
+if grep -q 'CFBundleDisplayName: 健康数据' project.yml; then
+  bad "还有 target 用着旧显示名「健康数据」"
+else
+  ok "没有遗留的旧显示名"
+fi
+
+# 回归守卫（重要）：**不要**再用 `#if HAS_WATCHOS_27_SDK` 之类的 SDK 编译条件
+# 去门控 watchOS 27 专属类型。那个条件依赖 CI runner 恰好装了新 SDK，
+# 实测从未成立 —— 结果 RMSSD 长期「绿着但根本没编进产物」。
+# 正确做法是用原始字符串构造标识符（老 SDK 能编译、新系统运行时可用）。
+if code_only watch/Health/MetricCatalog.swift | grep -q 'HAS_WATCHOS_27_SDK'; then
+  bad "MetricCatalog 又用 #if HAS_WATCHOS_27_SDK 门控了 —— CI 上该条件不成立，指标会静默消失"
+else
+  ok "MetricCatalog 没有用 SDK 编译条件门控 27 专属类型"
+fi
+
+if grep -q 'HKQuantityTypeIdentifierHeartRateVariabilityRMSSD' watch/Health/MetricCatalog.swift; then
+  ok "RMSSD 用原始字符串标识符构造类型（老 SDK 也能编译）"
+else
+  bad "找不到 RMSSD 的原始字符串标识符"
+fi
+
+# 不能退回到引用 Swift 符号（那个符号在 watchOS 26 SDK 里不存在）
+if code_only watch/Health/MetricCatalog.swift | grep -qE 'q\(\.heartRateVariabilityRMSSD\)'; then
+  bad "又用 Swift 符号引用了 heartRateVariabilityRMSSD —— 在只有 26.x SDK 的 runner 上编译不过"
+else
+  ok "没有引用 watchOS 27 专属的 Swift 符号"
+fi
+
 # ---------- 汇总 ----------
 printf '\n== 汇总：%d 通过，%d 失败\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
