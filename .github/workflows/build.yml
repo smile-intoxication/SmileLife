@@ -37,6 +37,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 结构性自检：不依赖 Xcode，几秒就能跑完。
+      # 故意放在最前面 —— 这些不变量一旦坏掉，后面整条构建链会「绿着但错着」
+      # （比如隐私清单没接进 bundle、版本号被硬编码，编译都不会报错）。
+      - name: 结构性自检
+        run: bash ci/verify-project.sh
+
       - name: 打印可用 Xcode
         run: |
           echo "=== /Applications 下的 Xcode ==="
@@ -101,6 +107,50 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             $EXTRA \
             2>&1 | tee build.log
+
+      # ------------------------------------------------------------
+      # 构建产物断言：**编译通过 ≠ 产物正确**。
+      # 下面这几类是「编译不报错、但上架或运行会出问题」的，必须显式验证。
+      # ------------------------------------------------------------
+      - name: 断言构建产物（隐私清单 / 版本号 / 嵌入关系）
+        if: steps.build.outcome == 'success'
+        run: |
+          set -uo pipefail
+          PRD=build/DerivedData/Build/Products
+          APP="$PRD/Debug-iphoneos/AppleWatchHealth.app"
+          WATCH="$APP/Watch/AppleWatch Health App.app"
+          WIDGET="$WATCH/PlugIns/AppleWatchHealth Widget.appex"
+          FAIL=0
+          chk() { if [ -e "$1" ]; then echo "  OK   $2"; else echo "  FAIL $2"; FAIL=1; fi }
+
+          echo "== 产物存在性与嵌入关系 =="
+          chk "$APP"    "iOS app"
+          chk "$WATCH"  "watch app 嵌在 iOS app 的 Watch/ 下"
+          chk "$WIDGET" "widget 以 .appex 嵌在 watch app 的 PlugIns/ 下"
+
+          echo "== 隐私清单必须出现在每个 bundle 根目录（缺了 App Store Connect 会拒收）=="
+          chk "$APP/PrivacyInfo.xcprivacy"    "iOS app 的隐私清单"
+          chk "$WATCH/PrivacyInfo.xcprivacy"  "watch app 的隐私清单"
+          chk "$WIDGET/PrivacyInfo.xcprivacy" "widget 的隐私清单"
+
+          echo "== 版本号必须真的来自 MARKETING_VERSION =="
+          EXPECT=$(grep -oE 'MARKETING_VERSION: "[^"]+"' project.yml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "  project.yml 里期望的版本：${EXPECT:-（没找到）}"
+          for P in "$APP/Info.plist" "$WATCH/Info.plist" "$WIDGET/Info.plist"; do
+            V=$(plutil -extract CFBundleShortVersionString raw "$P" 2>/dev/null || echo "?")
+            B=$(plutil -extract CFBundleVersion raw "$P" 2>/dev/null || echo "?")
+            echo "  $(basename "$(dirname "$P")") -> $V ($B)"
+            if [ -n "$EXPECT" ] && [ "$V" != "$EXPECT" ]; then
+              echo "  FAIL 版本号 $V != MARKETING_VERSION $EXPECT（说明被 XcodeGen 硬编码了）"
+              FAIL=1
+            fi
+          done
+
+          if [ "$FAIL" -ne 0 ]; then
+            echo "产物断言未通过"
+            exit 1
+          fi
+          echo "产物断言全部通过"
 
       # ------------------------------------------------------------
       # 下面两步只在编译失败时跑：把诊断信息发成一个 Issue。
@@ -212,6 +262,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # 和 compile job 跑同一份自检 —— 发货前再确认一次不变量没被破坏
+      - name: 结构性自检
+        run: bash ci/verify-project.sh
 
       - name: 检查密钥是否配好
         env:

@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell 脚本必须保持 LF —— 被转成 CRLF 后 bash 会报 "$'\r': command not found"
+*.sh text eol=lf
