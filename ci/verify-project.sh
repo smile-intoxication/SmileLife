@@ -218,6 +218,19 @@ for f in "$TMPD"/run-*.sh; do
   fi
 done
 [ "$NBLOCK" -eq 0 ] && bad "一个 run 块都没提取到（说明提取逻辑失效了，这一节等于没检查）"
+
+# ci/ 下的独立脚本也要查 —— 它们不在 workflow 的 run 块里，上面那一步覆盖不到。
+# （`ci/ship.sh` 就是一条命令走完整个发布流程的那个脚本，语法错会很致命）
+for f in ci/*.sh; do
+  [ -e "$f" ] || continue
+  if bash -n "$f" 2> "$TMPD/syntax.err"; then
+    ok "$f 语法正确"
+  else
+    bad "$f 有 shell 语法错误："
+    sed 's/^/         /' "$TMPD/syntax.err"
+  fi
+done
+
 rm -rf "$TMPD"
 
 # ---------- 9. App 图标（缺了会被 App Store 上传直接拒收） ----------
