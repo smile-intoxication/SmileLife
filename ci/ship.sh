@@ -7,21 +7,47 @@
 # 而 main 的编译检查是绿的，看起来一切正常。把顺序固定下来就不会漏。
 #
 # 用法：
-#   bash ci/ship.sh "提交信息"            # tag 自动递增（v1.4 → v1.5）
+#   bash ci/ship.sh "提交信息"            # tag 自动递增（v1.5 → v1.6）
 #   bash ci/ship.sh "提交信息" v2.0       # 也可以指定 tag
+#
+# ⚠️ 从 PowerShell 调 Git Bash 时，嵌套引号**非常容易被吃掉**：
+#   实测 `bash ci/ship.sh "加 ci/ship.sh: 一条命令…"` 传进来只剩一个「加」字，
+#   提交信息被截断（而且不会有任何报错）。
+#   所以**推荐**用文件传提交信息 —— 用编辑器/写文件工具落盘，完全不经过 shell 转义：
+#
+#     printf '%s' "提交信息" > .git/SHIP_MSG
+#     bash ci/ship.sh
+#
+#   `.git/SHIP_MSG` 在 .git 目录里，永远不会被提交，用完自动删除。
 #
 # 退出码 0 = main 和 tag 都推成功；非 0 = 中途失败（看输出，未推送的部分不会假装成功）
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
-MSG="${1:-}"
-TAG="${2:-}"
+MSG_FILE=".git/SHIP_MSG"
+
+# 提交信息来源，按优先级：第一个参数 > 环境变量 SHIP_MSG > 文件 .git/SHIP_MSG
+MSG="${1:-${SHIP_MSG:-}}"
+if [ -z "$MSG" ] && [ -f "$MSG_FILE" ]; then
+  MSG=$(cat "$MSG_FILE")
+fi
+TAG="${2:-${SHIP_TAG:-}}"
 
 if [ -z "$MSG" ]; then
   echo '用法: bash ci/ship.sh "提交信息" [tag]' >&2
+  echo '  或:  printf %s "提交信息" > .git/SHIP_MSG && bash ci/ship.sh' >&2
   exit 2
 fi
+# 提交信息只有一个词通常是引号被吃掉了，直接拦下来而不是写进历史
+case "$MSG" in
+  *" "*) ;;
+  *)
+    echo "⚠️ 提交信息看起来被截断了（只有「$MSG」一个词）。" >&2
+    echo "   这几乎一定是 shell 引号问题 —— 改用 .git/SHIP_MSG 文件传，见上面用法。" >&2
+    exit 2
+    ;;
+esac
 
 # ---------- 1. 自检（不过就中止，绝不推送） ----------
 echo "==> 1/5 结构性自检"
@@ -39,8 +65,11 @@ if git diff --cached --quiet; then
 else
   git commit -m "$MSG" || exit 1
 fi
+# 用完就删，避免下次误用同一条信息
+rm -f "$MSG_FILE"
 HEAD_SHA=$(git rev-parse --short HEAD)
 echo "    HEAD = $HEAD_SHA"
+echo "    信息 = $MSG"
 
 # ---------- 3. 推 main → 触发「编译检查」 ----------
 echo "==> 3/5 推 main（触发编译检查 job）"
