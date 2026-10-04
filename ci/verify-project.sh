@@ -168,6 +168,43 @@ else
   bad "没有 .gitignore"
 fi
 
+# ---------- 8. workflow 里的 shell 代码块必须语法正确 ----------
+# 为什么需要：workflow 的 run: 块本质是**字符串**，在 Windows 上编辑它没有任何反馈。
+# 一个多余的 `{` 要等到 macOS runner 上才会炸（run #6 就是这么红的），
+# 而且如果炸在"诊断步骤"里，还会把真正的失败原因一起吞掉。
+section "8. workflow 的 shell 代码块语法"
+TMPD=$(mktemp -d 2>/dev/null) || TMPD="/tmp/ci-verify-$$"
+mkdir -p "$TMPD"
+
+awk -v dir="$TMPD" '
+  {
+    ind = 0
+    while (substr($0, ind + 1, 1) == " ") ind++
+    if ($0 ~ /^[[:space:]]*run: *\|[[:space:]]*$/) { inblock = 1; n++; out = dir "/run-" n ".sh"; next }
+    if (inblock) {
+      if ($0 ~ /^[[:space:]]*$/ || ind >= 10) { print > out; next }
+      inblock = 0
+    }
+  }
+' .github/workflows/build.yml
+
+NBLOCK=0
+for f in "$TMPD"/run-*.sh; do
+  [ -e "$f" ] || continue
+  NBLOCK=$((NBLOCK + 1))
+  # GitHub 的 ${{ ... }} 表达式是**运行前**由 Actions 替换掉的，bash 永远看不到它。
+  # 但本地静态检查会看到，于是误报 "bad substitution"。先换成占位符再检查。
+  sed 's/\${{[^}]*}}/GH_EXPR/g' "$f" > "$f.clean"
+  if bash -n "$f.clean" 2> "$f.err"; then
+    ok "run 块 #$NBLOCK 语法正确"
+  else
+    bad "run 块 #$NBLOCK 有 shell 语法错误："
+    sed 's/^/         /' "$f.err"
+  fi
+done
+[ "$NBLOCK" -eq 0 ] && bad "一个 run 块都没提取到（说明提取逻辑失效了，这一节等于没检查）"
+rm -rf "$TMPD"
+
 # ---------- 汇总 ----------
 printf '\n== 汇总：%d 通过，%d 失败\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

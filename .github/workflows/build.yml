@@ -115,31 +115,50 @@ jobs:
       - name: 断言构建产物（隐私清单 / 版本号 / 嵌入关系）
         if: steps.build.outcome == 'success'
         run: |
-          set -uo pipefail
+          # 关掉 -e：断言失败要走到最后的统一汇总再统一 exit 1，
+          # 不要在中途某个命令返回非零时就静默退出（那样只看得到"失败了"看不到全貌）
+          set +e
           PRD=build/DerivedData/Build/Products
           APP="$PRD/Debug-iphoneos/AppleWatchHealth.app"
-          WATCH="$APP/Watch/AppleWatch Health App.app"
-          WIDGET="$WATCH/PlugIns/AppleWatchHealth Widget.appex"
+
+          # ⚠️ 不要硬编码 watch app / widget 的产物名。
+          #    它们由 target 名派生（target "AppleWatchHealth Watch App" -> "AppleWatchHealth Watch App.app"），
+          #    手写极容易少/多一个空格 —— 这段断言第一次写就是栽在这里
+          #    （写成了 "AppleWatch Health App.app"，多了个空格，于是断言自己失败了）。
+          #    改成"在预期目录里找唯一的那一个"，以后 target 改名也不会误报。
+          WATCH=$(find "$APP/Watch" -maxdepth 1 -name '*.app' 2>/dev/null | head -1)
+          WIDGET=$(find "$WATCH/PlugIns" -maxdepth 1 -name '*.appex' 2>/dev/null | head -1)
+
           FAIL=0
-          chk() { if [ -e "$1" ]; then echo "  OK   $2"; else echo "  FAIL $2"; FAIL=1; fi }
+          chk() { if [ -e "$1" ]; then echo "  OK   $2"; else echo "  FAIL $2  -> $1"; FAIL=1; fi }
 
           echo "== 产物存在性与嵌入关系 =="
-          chk "$APP"    "iOS app"
-          chk "$WATCH"  "watch app 嵌在 iOS app 的 Watch/ 下"
-          chk "$WIDGET" "widget 以 .appex 嵌在 watch app 的 PlugIns/ 下"
+          chk "$APP" "iOS app"
+          if [ -n "$WATCH" ]; then
+            chk "$WATCH" "watch app 嵌在 iOS app 的 Watch/ 下"
+          else
+            echo "  FAIL Watch/ 下没有找到 .app"; FAIL=1
+          fi
+          if [ -n "$WIDGET" ]; then
+            chk "$WIDGET" "widget 以 .appex 嵌在 watch app 的 PlugIns/ 下"
+          else
+            echo "  FAIL PlugIns/ 下没有找到 .appex"; FAIL=1
+          fi
 
           echo "== 隐私清单必须出现在每个 bundle 根目录（缺了 App Store Connect 会拒收）=="
-          chk "$APP/PrivacyInfo.xcprivacy"    "iOS app 的隐私清单"
-          chk "$WATCH/PrivacyInfo.xcprivacy"  "watch app 的隐私清单"
-          chk "$WIDGET/PrivacyInfo.xcprivacy" "widget 的隐私清单"
+          for B in "$APP" "$WATCH" "$WIDGET"; do
+            [ -n "$B" ] && chk "$B/PrivacyInfo.xcprivacy" "$(basename "$B") 的隐私清单"
+          done
 
           echo "== 版本号必须真的来自 MARKETING_VERSION =="
           EXPECT=$(grep -oE 'MARKETING_VERSION: "[^"]+"' project.yml | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "  project.yml 里期望的版本：${EXPECT:-（没找到）}"
-          for P in "$APP/Info.plist" "$WATCH/Info.plist" "$WIDGET/Info.plist"; do
+          for B in "$APP" "$WATCH" "$WIDGET"; do
+            [ -z "$B" ] && continue
+            P="$B/Info.plist"
             V=$(plutil -extract CFBundleShortVersionString raw "$P" 2>/dev/null || echo "?")
-            B=$(plutil -extract CFBundleVersion raw "$P" 2>/dev/null || echo "?")
-            echo "  $(basename "$(dirname "$P")") -> $V ($B)"
+            BVER=$(plutil -extract CFBundleVersion raw "$P" 2>/dev/null || echo "?")
+            echo "  $(basename "$B") -> $V ($BVER)"
             if [ -n "$EXPECT" ] && [ "$V" != "$EXPECT" ]; then
               echo "  FAIL 版本号 $V != MARKETING_VERSION $EXPECT（说明被 XcodeGen 硬编码了）"
               FAIL=1
@@ -164,9 +183,13 @@ jobs:
         #    —— 而「runner 换镜像后没有 watchOS SDK」恰恰是最需要远程诊断的情况。
         if: failure()
         run: |
+          # ⚠️ 诊断步骤本身**绝不能**因为"没找到 error"之类的原因失败。
+          #    run #6 的教训：产物断言失败 → 诊断步骤也失败 → ci-report.md 没生成
+          #    → Issue 没建成，结果"为什么失败"这个最关键的信息完全丢失。
+          #    诊断代码必须比被诊断的代码更宽容。
+          set +e
           # 前面的步骤失败时可能还没有 build.log，先建空的，免得后面二次失败
           [ -f build.log ] || : > build.log
-          {
           {
             echo "### Xcode 版本"
             xcodebuild -version
@@ -175,23 +198,34 @@ jobs:
             ls -d /Applications/Xcode*.app
             echo ""
             echo "### 可用 SDK"
-            xcodebuild -showsdks | grep -iE "watch|ios" || true
+            xcodebuild -showsdks | grep -iE "watch|ios"
             echo ""
             echo "### 工程 targets / schemes"
-            xcodebuild -list -project AppleWatchHealth.xcodeproj || true
-          } > ci-env.txt
+            xcodebuild -list -project AppleWatchHealth.xcodeproj
+          } > ci-env.txt 2>&1
+          echo "环境诊断已写入 ci-env.txt（含 stderr）"
 
       - name: 发布失败诊断到 Issue
         if: failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 同样必须宽容：这一步存在的意义就是**保留失败信息**，
+          # 它自己失败会让真实原因彻底消失（run #6 就是这样）
+          set +e
+          [ -f ci-env.txt ] || echo "（环境诊断步骤没有生成 ci-env.txt）" > ci-env.txt
+          [ -f build.log ]  || echo "（没有 build.log：失败发生在编译之前）" > build.log
+
           {
-            echo "# CI 编译失败诊断"
+            echo "# CI 失败诊断"
             echo ""
             echo "- 运行编号：#${{ github.run_number }}（第 ${{ github.run_attempt }} 次尝试）"
             echo "- 提交：\`${{ github.sha }}\`"
             echo "- 运行日志：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo ""
+            echo "> ⚠️ 失败**不一定**是编译错误。结构性自检、产物断言、依赖安装、"
+            echo "> SDK 探测失败都会走到这里，而那时编译错误列表是空的 ——"
+            echo "> 遇到空列表请重点看第 1 节环境和第 3 节日志末尾。"
             echo ""
             echo "## 1. 环境"
             echo ""
@@ -202,7 +236,12 @@ jobs:
             echo "## 2. 编译错误（去重，最多 100 条）"
             echo ""
             echo '```'
-            grep -E "error: " build.log | sed 's|.*/SmileLife/||' | sort -u | head -n 100 || echo "（没有匹配到 error: ）"
+            ERRORS=$(grep -E "error: " build.log | sed 's|.*/SmileLife/||' | sort -u | head -n 100)
+            if [ -n "$ERRORS" ]; then
+              echo "$ERRORS"
+            else
+              echo "（没有匹配到 error: —— 说明失败不是编译引起的）"
+            fi
             echo '```'
             echo ""
             echo "## 3. 日志末尾 100 行"
@@ -212,9 +251,15 @@ jobs:
             echo '```'
           } > ci-report.md
 
+          # GitHub Issue 正文上限 65536 字符。超了 gh 会直接拒绝，
+          # 而且是在"正在报错"的时候报错，信息就又丢了。截断到安全长度。
+          head -c 60000 ci-report.md > ci-report.trimmed.md
+
           gh issue create \
-            --title "CI 编译失败：run #${{ github.run_number }}" \
-            --body-file ci-report.md
+            --repo "${{ github.repository }}" \
+            --title "CI 失败：run #${{ github.run_number }}" \
+            --body-file ci-report.trimmed.md \
+            || echo "⚠️ 建 Issue 失败（可能缺 issues:write 权限），详情见 job 的 Job Summary"
 
       - name: 提取错误摘要到 Job Summary
         if: always()
