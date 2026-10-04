@@ -64,6 +64,11 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.smile.intoxication.applewatchhealth
         CODE_SIGN_ENTITLEMENTS: ios/iOSApp.entitlements
         TARGETED_DEVICE_FAMILY: "1"
+        # ⚠️ 必须显式指定，XcodeGen 不会替你设这个（Xcode 新建工程时模板才会带）。
+        #    它是 actool 的 --app-icon 参数来源，不设的话：
+        #      · 不生成 CFBundleIconName → 上传报 "Missing Info.plist value"
+        #      · 不派生 120x120 → 上传报 "Missing required icon file"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     dependencies:
       # ✅ 已验证正确（run #3 的成功日志）：
       #    Copy .../Debug-iphoneos/AppleWatchHealth.app/Watch/AppleWatch Health App.app
@@ -90,6 +95,9 @@ targets:
       - path: watch/Storage
       - path: watch/Shared
       - path: watch/Upload
+      # App 图标 asset catalog（只放一张 1024x1024，actool 自动派生全部尺寸）。
+      # 由 `python ci/make-app-icon.py` 生成，可复现、可 review。
+      - path: watch/Assets.xcassets
       # 隐私清单：本 target 用到 UserDefaults，必须声明 required reason（CA92.1）。
       # Apple 原文：2024-05-01 起，未在隐私清单里声明 required reason API 的 app
       # **不被 App Store Connect 接受**。
@@ -112,6 +120,9 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.smile.intoxication.applewatchhealth.watchkitapp
         CODE_SIGN_ENTITLEMENTS: watch/WatchApp.entitlements
         TARGETED_DEVICE_FAMILY: "4"
+        # 同 iOS：不设这个就不会生成 CFBundleIconName / CFBundleIconFiles，
+        # 上传时会报 "Missing Icons. No icons found for watch application"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     dependencies:
       # ✅ 已验证正确（run #3 的成功日志）：
       #    产物是 .appex（不是 .app），被 Copy 进 watch app 的 PlugIns/，

@@ -23,10 +23,12 @@
 | **怎么打包部署到手表**（无 Mac） | [docs/无Mac打包部署指南.md](docs/无Mac打包部署指南.md) |
 | **手表端设计思路**（为什么这么写） | [docs/手表端App-设计方案.md](docs/手表端App-设计方案.md) |
 | **HealthKit 能不能拿到某类数据** | [docs/AppleWatch健康数据App-可行性调研.md](docs/AppleWatch健康数据App-可行性调研.md) |
+| **中国区上架/收费要过哪些合规关** | [docs/中国区上架合规清单.md](docs/中国区上架合规清单.md) |
 | **怎么在本地/CI 落地这个工程** | [watch/README.md](watch/README.md) |
 
-三份文档的分工：**调研**回答"Apple 到底给不给"（每条结论都带官方链接）；
-**设计方案**回答"我们怎么设计、为什么"；**部署指南**回答"怎么把它装到手表上"。
+四份文档的分工：**调研**回答"Apple 到底给不给"（每条结论都带官方链接）；
+**设计方案**回答"我们怎么设计、为什么"；**部署指南**回答"怎么把它装到手表上"；
+**合规清单**回答"上架中国区、收费还差什么"。
 
 ---
 
@@ -36,7 +38,7 @@
 .github/workflows/build.yml   CI：compile（免签名编译检查）/ testflight（打包上传）
 project.yml                   XcodeGen 工程描述（Windows 产不出可靠的 .xcodeproj）
 ci/ExportOptions.plist        导出与上传设置
-docs/                         三份文档
+docs/                         四份文档（调研 / 设计 / 部署 / 合规）
 watch/                        手表端全部代码
   App/                        入口、后台调度、主界面
   Health/                     指标注册表、授权、增量同步引擎

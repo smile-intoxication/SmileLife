@@ -205,6 +205,57 @@ done
 [ "$NBLOCK" -eq 0 ] && bad "一个 run 块都没提取到（说明提取逻辑失效了，这一节等于没检查）"
 rm -rf "$TMPD"
 
+# ---------- 9. App 图标（缺了会被 App Store 上传直接拒收） ----------
+# run #12 就是栽在这里：整个项目一个图标都没有，签名全过了、ipa 都传到
+# App Store Connect 了，最后被服务端校验打回来：
+#   Missing required icon file / Missing Info.plist value 'CFBundleIconName'
+#   Missing Icons. No icons found for watch application ...
+section "9. App 图标"
+for cat in ios watch; do
+  base="$cat/Assets.xcassets"
+  for f in "$base/Contents.json" \
+           "$base/AppIcon.appiconset/Contents.json" \
+           "$base/AppIcon.appiconset/AppIcon-1024.png"; do
+    if [ -f "$f" ]; then ok "$f"; else bad "缺少 $f"; fi
+  done
+done
+
+# PNG 的 IHDR 里第 25 字节（0 起算）是 color type：
+#   2 = truecolor（RGB，无 alpha）—— App Store 要求的就是这个
+#   6 = truecolor + alpha        —— 会被拒收（"can't be transparent nor contain an alpha channel"）
+for cat in ios watch; do
+  png="$cat/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
+  [ -f "$png" ] || continue
+  ct=$(od -A n -t u1 -j 25 -N 1 "$png" 2>/dev/null | tr -d ' \n')
+  case "$ct" in
+    2) ok "$cat 图标是 RGB（无 alpha 通道）" ;;
+    6) bad "$cat 图标是 RGBA —— 含 alpha 通道，App Store 会拒收" ;;
+    *) bad "$cat 图标的 PNG color type 读不出来（得到 '${ct}'）" ;;
+  esac
+done
+
+# 容忍冒号两边的空格：Xcode 写的是 `"platform" : "ios"`，但手写/脚本生成的可能是 `"platform": "ios"`
+grep -qE '"platform" *: *"ios"' ios/Assets.xcassets/AppIcon.appiconset/Contents.json 2>/dev/null \
+  && ok "iOS 图标的 platform 是 ios" \
+  || bad "iOS 图标的 Contents.json 里 platform 不是 ios"
+grep -qE '"platform" *: *"watchos"' watch/Assets.xcassets/AppIcon.appiconset/Contents.json 2>/dev/null \
+  && ok "watchOS 图标的 platform 是 watchos" \
+  || bad "watchOS 图标的 Contents.json 里 platform 不是 watchos"
+
+# 两个 target 都必须显式指定 —— XcodeGen **不会**替你设这个（只有 Xcode 模板才会），
+# 不设的话 actool 收不到 --app-icon，既不生成 CFBundleIconName 也不派生 120x120
+NICON=$(grep -c 'ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon' project.yml)
+if [ "$NICON" -ge 2 ]; then
+  ok "ASSETCATALOG_COMPILER_APPICON_NAME 在 iOS 和 watch 两个 target 都设了"
+else
+  bad "ASSETCATALOG_COMPILER_APPICON_NAME 只出现 $NICON 次（应为 2）—— 图标不会进 bundle"
+fi
+
+# watch 的 asset catalog 必须显式接进 sources（iOS 的由 `- path: ios` 自动覆盖）
+grep -q -- '- path: watch/Assets.xcassets' project.yml \
+  && ok "watch/Assets.xcassets 已接进 watch target" \
+  || bad "project.yml 没有引用 watch/Assets.xcassets"
+
 # ---------- 汇总 ----------
 printf '\n== 汇总：%d 通过，%d 失败\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
