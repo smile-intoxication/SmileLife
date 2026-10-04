@@ -11,8 +11,43 @@ import SwiftData
 /// 📌 **落盘位置**：SwiftData 用的是文件型库（`isStoredInMemoryOnly: false`），
 /// 存在 app 沙盒的 Application Support 目录，**不是运行内存**。
 /// app 重启、被系统杀掉、手表重启都不会丢数据。
+/// 单个指标在本地的采集情况，供诊断界面展示。
+///
+/// 刻意做成独立的 `Sendable` 值类型：诊断界面在别的 actor/主线程上，
+/// 而 `@Model` 实例（SampleRecord）**不能跨 actor 传递**。
+struct MetricSampleStats: Sendable {
+    let metricID: String
+    let count: Int
+    let latest: Date?
+}
+
 @ModelActor
 actor HealthStore {
+
+    // MARK: - 诊断
+
+    /// 每个指标在本地的样本数与最新样本时间。
+    ///
+    /// ⚠️ 参数刻意是 `[String]`（指标 id）而不是 `[MetricDescriptor]`：
+    /// MetricDescriptor 里带一个闭包（睡眠标签翻译），**不是 Sendable**，
+    /// 跨 actor 传会在 Swift 6 下直接报错。传纯值最省心。
+    func stats(for metricIDs: [String]) throws -> [MetricSampleStats] {
+        metricIDs.map { id in
+            let predicate = #Predicate<SampleRecord> { $0.metricID == id }
+            let count = (try? modelContext.fetchCount(FetchDescriptor<SampleRecord>(predicate: predicate))) ?? 0
+
+            var latest: Date?
+            if count > 0 {
+                var descriptor = FetchDescriptor<SampleRecord>(
+                    predicate: predicate,
+                    sortBy: [SortDescriptor(\.startDate, order: .reverse)]
+                )
+                descriptor.fetchLimit = 1
+                latest = (try? modelContext.fetch(descriptor))?.first?.startDate
+            }
+            return MetricSampleStats(metricID: id, count: count, latest: latest)
+        }
+    }
 
     // MARK: - 写入
 

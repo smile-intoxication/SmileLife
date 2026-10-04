@@ -17,6 +17,15 @@ final class WatchServices {
     /// 预留：等确认上传目标后换成真实实现
     let uploadTransport: UploadTransport = NoopUploadTransport()
 
+    /// 本地库落盘位置（诊断界面展示用）
+    var storeURL: URL? { container.configurations.first?.url }
+
+    /// 本地库占用的磁盘字节数（含 SQLite 的 -wal / -shm 边车文件）
+    var storeBytes: Int64 {
+        guard let path = storeURL?.path else { return 0 }
+        return LocalFile.sqliteSize(basePath: path)
+    }
+
     private init() {
         let schema = Schema([
             SampleRecord.self,
@@ -77,5 +86,30 @@ final class WatchServices {
 
         // 3) 连内存库都建不起来，说明 Schema 本身有硬错误——这时崩掉才能暴露问题
         fatalError("ModelContainer 彻底无法创建（内存库也失败），Schema 定义可能有误")
+    }
+}
+
+/// 本地文件小工具。
+enum LocalFile {
+
+    /// 文件字节数；取不到就返回 0。
+    ///
+    /// ⚠️ 刻意用 `FileHandle.seekToEnd()`，**不用** `FileManager.attributesOfItem(atPath:)`：
+    /// 后者属于 Apple 的 **required-reason API（FileTimestamp 类别）**，
+    /// 一旦使用就必须在隐私清单里额外声明一类 API，否则 App Store Connect 会拦。
+    /// 而我们对文件时间戳毫无兴趣，只是想知道"这个文件多大"——
+    /// `seekToEnd` 不是 required-reason API，语义也更直接（不用把文件读进内存）。
+    static func size(at url: URL) -> Int64 {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return 0 }
+        defer { try? handle.close() }
+        return Int64((try? handle.seekToEnd()) ?? 0)
+    }
+
+    /// SQLite 主文件 + `-wal` / `-shm` 边车文件的总大小。
+    /// 只算主文件会明显低估（WAL 里可能压着大量还没 checkpoint 的数据）。
+    static func sqliteSize(basePath: String) -> Int64 {
+        ["", "-wal", "-shm"].reduce(Int64(0)) { total, suffix in
+            total + size(at: URL(fileURLWithPath: basePath + suffix))
+        }
     }
 }

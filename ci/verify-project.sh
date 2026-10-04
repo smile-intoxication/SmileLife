@@ -154,6 +154,14 @@ else
   ok "ModelContainer 初次失败走自愈路径，没有 fatalError"
 fi
 
+# required-reason API 守卫：用了就必须在隐私清单里声明，否则 App Store Connect 直接拦。
+# FileTimestamp 这一类最容易被顺手用上（读文件大小/时间就会碰到）。
+if grep -rq 'attributesOfItem' watch ios --include='*.swift' 2>/dev/null; then
+  bad "代码里用了 FileManager.attributesOfItem —— 那是 required-reason API（FileTimestamp 类别），必须在 PrivacyInfo.xcprivacy 里声明才能过审"
+else
+  ok "没有用 attributesOfItem（文件大小走 FileHandle.seekToEnd，不碰 required-reason API）"
+fi
+
 # ---------- 7. 密钥与产物不入库 ----------
 section "7. 密钥与产物不入库"
 if [ -f .gitignore ]; then

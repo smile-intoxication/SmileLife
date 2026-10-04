@@ -18,49 +18,63 @@ struct ContentView: View {
     // 授权情况只能靠"有没有数据"间接体现，所以空态文案里把两种可能都讲清楚。
 
     var body: some View {
-        List {
+        NavigationStack {
+            List {
 
-            // ——— 同步状态：如实展示"数据是什么时候的" ———
-            Section {
-                if isSyncing {
-                    HStack(spacing: 6) {
-                        ProgressView()
-                        Text("同步中…")
-                    }
-                } else {
-                    Text(lastSyncText)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                if let error = status.lastError {
-                    Text(error)
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .lineLimit(2)
-                }
-            }
-
-            // ——— 各指标最新值 ———
-            if snapshot.items.isEmpty {
-                emptyState
-            } else {
+                // ——— 同步状态：如实展示"数据是什么时候的" ———
                 Section {
-                    ForEach(snapshot.items) { item in
-                        MetricRow(item: item)
+                    if isSyncing {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                            Text("同步中…")
+                        }
+                    } else {
+                        Text(lastSyncText)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let error = status.lastError {
+                        Text(error)
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .lineLimit(2)
                     }
                 }
-            }
 
-            // ——— 手动触发 ———
-            Section {
-                Button {
-                    Task { await manualSync() }
-                } label: {
-                    Label("立即同步", systemImage: "arrow.clockwise")
+                // ——— 各指标最新值 ———
+                if snapshot.items.isEmpty {
+                    emptyState
+                } else {
+                    Section {
+                        ForEach(snapshot.items) { item in
+                            MetricRow(item: item)
+                        }
+                    }
                 }
-                .disabled(isSyncing)
-            }
 
+                // ——— 手动触发 ———
+                Section {
+                    Button {
+                        Task { await manualSync() }
+                    } label: {
+                        Label("立即同步", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(isSyncing)
+                }
+
+                // ——— 诊断 ———
+                // 开发机是 Windows、看不到设备日志，所以「到底采到多少数据」
+                // 「某个类型到底存不存在」只能靠这个界面回答。
+                Section {
+                    NavigationLink {
+                        DiagnosticsView()
+                    } label: {
+                        Label("诊断", systemImage: "stethoscope")
+                    }
+                }
+
+            }
+            .navigationTitle("长明护心")
         }
         .task { await bootstrap() }
     }
