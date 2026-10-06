@@ -267,11 +267,21 @@ jobs:
           # 而且是在"正在报错"的时候报错，信息就又丢了。截断到安全长度。
           head -c 60000 ci-report.md > ci-report.trimmed.md
 
+          # ⚠️ 建 Issue 失败**必须响亮地失败**，不能只 echo 一句就算了。
+          #
+          # 实测踩到过：这一步带了 `|| echo "..."`，于是 `gh issue create` 失败时
+          # 这一步照样报 **success**，**Issue 也没建** —— 而它存在的全部意义
+          # 就是"把失败信息留下来"。结果是：CI 红了（由后面的"编译是否通过"兜底），
+          # 但仓库里**一条诊断都没有**，远程只能靠猜。
+          # 这跟坑 #8 是同一类：**失败被吞掉，而且是吞在"专门负责报告失败"的地方。**
+          #
+          # 注意这里只对"报告本身失败"严格；对**输入**仍然宽容（上面已经补了占位文件）——
+          # 那是坑 #11 的要求，两者不冲突。
           gh issue create \
             --repo "${{ github.repository }}" \
             --title "CI 失败：run #${{ github.run_number }}" \
             --body-file ci-report.trimmed.md \
-            || echo "⚠️ 建 Issue 失败（可能缺 issues:write 权限），详情见 job 的 Job Summary"
+            || { echo "::error::建 Issue 失败（检查 workflow 的 permissions 里有没有 issues: write）"; exit 1; }
 
       - name: 提取错误摘要到 Job Summary
         if: always()

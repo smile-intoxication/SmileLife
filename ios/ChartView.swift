@@ -13,7 +13,14 @@ import Charts
 ///
 /// **自己取自己的数** —— 每张卡有自己的加载状态。全塞进一个大视图里循环的话，
 /// 会变成十几个 `@State` 数组，而且更容易触发 SwiftUI 的类型推导超时。
-struct MetricChartCard: View {
+///
+/// ⚠️ 必须是 `private`（文件作用域下等于 fileprivate）：
+/// 它的 `item` 属性类型 `ChartPickerItem` 是文件私有的，
+/// 而**内部类型不能暴露文件私有类型** —— 那是编译错误：
+/// `property must be declared fileprivate because its type uses a private type`。
+/// 反过来把 `ChartPickerItem` 提成 internal 也行，但那样等于给整个模块暴露一个
+/// 只在图表页内部有意义的类型，没必要。
+private struct MetricChartCard: View {
 
     let item: ChartPickerItem
     let range: ChartRange
