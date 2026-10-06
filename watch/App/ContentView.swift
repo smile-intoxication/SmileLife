@@ -43,11 +43,17 @@ struct ContentView: View {
                     }
                     // 如实告诉用户"还有多少没送到手机"。
                     // 不发「同步完成」这种笼统的提示 —— 那样用户会以为手机上已经有了。
+                    //
+                    // ⚠️ 三元表达式两边必须写全 `Color.`：
+                    //    `.secondary` 是 `HierarchicalShapeStyle`，`.orange` 是 `Color`，
+                    //    简写形式会让编译器把两边推断成同一个类型然后失败
+                    //    （CI 上就是这么红的：member 'orange' in 'HierarchicalShapeStyle'
+                    //      produces result of type 'Color', but context expects 'HierarchicalShapeStyle'）。
                     Text(pendingSends == 0
                          ? "数据已全部交给 iPhone"
                          : "还有 \(pendingSends) 条待发送到 iPhone")
                         .font(.caption2)
-                        .foregroundStyle(pendingSends == 0 ? .secondary : .orange)
+                        .foregroundStyle(pendingSends == 0 ? Color.secondary : Color.orange)
                 }
 
                 // ——— 各指标最新值 ———

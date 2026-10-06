@@ -195,6 +195,9 @@ enum BucketMath {
     /// 一个 (指标, 时间) 落在哪个桶里。数值型才需要汇总桶。
     static func bucket(metricID: String, date: Date) -> (key: String, start: Date) {
         let start = floor(date, seconds: PhoneStoragePolicy.bucketSeconds)
-        return (key(metricID: metricID, bucketStart: start), start)
+        // 显式写成带标签的元组：裸的 `(x, y)` 依赖标签推断，
+        // 没必要在返回值这里省这几个字符（CI 上抓不到，只能靠人看）。
+        let storageKey = key(metricID: metricID, bucketStart: start)
+        return (key: storageKey, start: start)
     }
 }
