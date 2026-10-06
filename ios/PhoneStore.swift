@@ -48,10 +48,17 @@ struct PhoneIngestResult: Sendable {
     var deleted = 0
     var bucketsRebuilt = 0
     var pruned = 0
+    /// 新增 / 更新的**心跳序列**条数（RR 间期的来源）
+    var heartbeatInserted = 0
+    var heartbeatUpdated = 0
 
     var summary: String {
-        "+\(inserted) 新 / \(updated) 更新 / \(deleted) 删除 / \(bucketsRebuilt) 桶"
-            + (pruned > 0 ? " / 清理 \(pruned) 条过期" : "")
+        var text = "+\(inserted) 新 / \(updated) 更新 / \(deleted) 删除 / \(bucketsRebuilt) 桶"
+        if heartbeatInserted + heartbeatUpdated > 0 {
+            text += " / 心跳序列 +\(heartbeatInserted) 更新\(heartbeatUpdated)"
+        }
+        if pruned > 0 { text += " / 清理 \(pruned) 条过期" }
+        return text
     }
 }
 
@@ -134,6 +141,31 @@ actor PhoneStore {
                     let bucket = BucketMath.bucket(metricID: payload.metricID, date: payload.startDate)
                     touched.insert(bucket.key)
                     touchedMetric.insert(payload.metricID)
+                }
+            }
+        }
+
+        // ——— 2.5 心跳序列（RR 间期的来源）———
+        // ⚠️ 它**不进汇总桶**：一条序列里是几百个间期，而 Poincaré 图要的是
+        //    "逐间配对"，不是某个时间格里的 min/max/avg。
+        //    硬塞进汇总表只会让那张表的含义变糊。
+        if let incoming = batch.heartbeatSeries, !incoming.isEmpty {
+            let ids = incoming.map(\.uuid)
+            let existing = try modelContext.fetch(
+                FetchDescriptor<PhoneHeartbeatSeries>(predicate: #Predicate { ids.contains($0.uuid) })
+            )
+            var byUUID: [UUID: PhoneHeartbeatSeries] = [:]
+            for record in existing { byUUID[record.uuid] = record }
+
+            for payload in incoming {
+                if let record = byUUID[payload.uuid] {
+                    record.apply(payload, receivedAt: now)
+                    result.heartbeatUpdated += 1
+                } else {
+                    let record = PhoneHeartbeatSeries(payload: payload, receivedAt: now)
+                    modelContext.insert(record)
+                    byUUID[payload.uuid] = record
+                    result.heartbeatInserted += 1
                 }
             }
         }
@@ -253,7 +285,16 @@ actor PhoneStore {
         let before = try modelContext.fetchCount(FetchDescriptor<PhoneSample>())
         try modelContext.delete(model: PhoneSample.self, where: #Predicate { $0.startDate < cutoff })
         let after = try modelContext.fetchCount(FetchDescriptor<PhoneSample>())
-        return max(0, before - after)
+
+        // 心跳序列同样按原始保留期清理。它的**派生结果**（Poincaré 图）
+        // 不是我们要长期留的东西 —— 那张图看的是"最近一晚/几晚"的形态，
+        // 而不是半年趋势（半年趋势用 15 分钟汇总桶看就够了）。
+        let seriesBefore = try modelContext.fetchCount(FetchDescriptor<PhoneHeartbeatSeries>())
+        try modelContext.delete(model: PhoneHeartbeatSeries.self,
+                                where: #Predicate { $0.startDate < cutoff })
+        let seriesAfter = try modelContext.fetchCount(FetchDescriptor<PhoneHeartbeatSeries>())
+
+        return max(0, before - after) + max(0, seriesBefore - seriesAfter)
     }
 
     // MARK: - 读取：图表
@@ -304,6 +345,58 @@ actor PhoneStore {
                 }
             )
         )
+    }
+
+    // MARK: - 读取：RR 间期（Poincaré）
+
+    /// 心跳序列条数。图表页靠它决定"要不要显示 RR 间期那个入口"。
+    ///
+    /// 刻意的设计：**没有数据就不显示入口**，而不是留一个永远为空的死项。
+    /// 这条链路依赖手表真的产生心跳序列（很可能需要房颤历史），
+    /// 对这种"可能永远没有"的功能，留一个空入口比没有入口更糟。
+    func heartbeatSeriesCount() throws -> Int {
+        try modelContext.fetchCount(FetchDescriptor<PhoneHeartbeatSeries>())
+    }
+
+    func latestHeartbeatSeriesDate() throws -> Date? {
+        var descriptor = FetchDescriptor<PhoneHeartbeatSeries>(
+            sortBy: [SortDescriptor(\.startDate, order: .reverse)]
+        )
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first?.startDate
+    }
+
+    /// 取时间范围内的 RR 间期，**按序列分组**返回。
+    ///
+    /// ## ⚠️ 为什么返回分组而不是一个大数组
+    /// Poincaré 配对只能在**同一条序列内**做。跨序列配对等于把相隔几分钟的
+    /// 两次测量连成一个点 —— 纯噪声。如果这里返回扁平数组，
+    /// 调用方迟早会写出跨序列配对的 bug，而且是**静默的**（图还是会画出来）。
+    /// 把"分组"做成返回类型的性质，这个错误就不可能犯。
+    ///
+    /// - Parameter seriesLimit: 最多取多少条序列。**必须有限制**：
+    ///   一晚约 120 条，90 天就是 1 万多条、上百万个间期，
+    ///   全读进内存只是为了画一张最多 3000 个点的图。
+    ///   ⚠️ 被截断时**如实回报**（`isTruncated`），绝不静默丢数据。
+    func rrSeries(from: Date, to: Date, seriesLimit: Int = 3_000) throws -> RRSeriesFetch {
+        var descriptor = FetchDescriptor<PhoneHeartbeatSeries>(
+            predicate: #Predicate { $0.startDate >= from && $0.startDate < to },
+            sortBy: [SortDescriptor(\.startDate, order: .forward)]
+        )
+        descriptor.fetchLimit = seriesLimit
+
+        let records = try modelContext.fetch(descriptor)
+
+        let series = records.compactMap { record -> RRSeriesData? in
+            // ⚠️ 跳过**不自洽**的序列（拍数与间期数对不上）。
+            //    画出来会是一堆凭空捏造的间期，比不画更糟。
+            guard record.isSelfConsistent else { return nil }
+            return RRSeriesData(seriesUUID: record.uuid,
+                                startDate: record.startDate,
+                                rrMillis: record.rrMillis)
+        }
+
+        return RRSeriesFetch(series: series, isTruncated: records.count >= seriesLimit)
     }
 
     // MARK: - 读取：概览与状态

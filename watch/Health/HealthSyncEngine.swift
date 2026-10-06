@@ -64,6 +64,17 @@ actor HealthSyncEngine {
         // 官方只说"几秒"，这里取 8 秒，宁可少同步几个指标也不要被系统杀掉。
         let deadline = Date().addingTimeInterval(reason == .background ? 8 : 60)
 
+        // ⚠️ 授权还没被用户决定时，**不推进任何同步游标**。
+        //    原因见 `HealthAuthorizer.isAuthorizationPending()`：未授权时
+        //    HealthKit 返回"空结果 + 有效的新游标"，推进之后就永远补不回
+        //    授权前那段历史，而且一点报错都没有。
+        //    这一条对 v1.8 尤其关键 —— 心跳序列是**新增的**读权限，
+        //    后台刷新完全可能在用户点授权之前先跑一轮。
+        // 括号是必要的：`await !foo()` 的写法把 `!` 和 `await` 混在一起，
+        // 不写成 `!(await foo())` 就是在赌解析顺序 —— 没必要赌。
+        let authorizationPending = await HealthAuthorizer.shared.isAuthorizationPending()
+        let canAdvanceAnchor = !authorizationPending
+
         for metric in MetricCatalog.all where isEnabled(metric) {
             if Date() > deadline {
                 print("[Sync] 超时，剩余指标留到下次：\(metric.id)")
@@ -72,7 +83,9 @@ actor HealthSyncEngine {
             do {
                 // ⚠️ 删除也要转发给 iPhone：手表本地删了、手机不删，
                 //    手机上就会一直显示用户已经删掉的数据（正确性问题）。
-                let deleted = try await syncOne(metric, deadline: deadline)
+                let deleted = try await syncOne(metric,
+                                                deadline: deadline,
+                                                canAdvanceAnchor: canAdvanceAnchor)
                 if !deleted.isEmpty {
                     await deletions.append(deleted)
                 }
@@ -82,6 +95,22 @@ actor HealthSyncEngine {
                 print("[Sync] \(metric.id) 失败：\(error.localizedDescription)")
                 roundErrors.append("\(metric.id): \(error.localizedDescription)")
             }
+        }
+
+        // ——— 心跳序列（RR 间期）：**独立通道** ———
+        // 为什么不放进上面那个循环：它是 `HKSeriesType` 而不是 quantity/category，
+        // 进不了 `MetricCatalog`；而且要"两步查询 + 逐拍展开"，
+        // 成本和普通样本不是一个量级，必须单独限量。见 `syncHeartbeatSeries`。
+        do {
+            let seriesInserted = try await syncHeartbeatSeries(deadline: deadline,
+                                                              canAdvanceAnchor: canAdvanceAnchor)
+            if seriesInserted > 0 {
+                print("[Sync] 心跳序列新增 \(seriesInserted) 条")
+            }
+        } catch {
+            // 单独 catch：心跳序列这条路断了，不该影响心率、血氧那些已经同步好的指标
+            print("[Sync] 心跳序列失败：\(error.localizedDescription)")
+            roundErrors.append("heartbeat: \(error.localizedDescription)")
         }
 
         // 重建快照（小组件的数据源）
@@ -145,7 +174,9 @@ actor HealthSyncEngine {
     ///   调用方要把它们转发给 iPhone —— 手表本地删了、手机不删，
     ///   手机上就会一直显示用户已经删掉的数据。
     @discardableResult
-    private func syncOne(_ metric: MetricDescriptor, deadline: Date) async throws -> [UUID] {
+    private func syncOne(_ metric: MetricDescriptor,
+                         deadline: Date,
+                         canAdvanceAnchor: Bool) async throws -> [UUID] {
         // ⚠️ 游标损坏时不要让它把这个指标永久卡死：清掉坏游标、按首次同步重来。
         //    （锚点是 NSSecureCoding 存档，跨版本/损坏时会解档失败；
         //      不处理的话每一轮都在第一行以同样方式失败，而且 lastError 只有单字段，
@@ -199,9 +230,15 @@ actor HealthSyncEngine {
             totalNew += records.count
 
             // 保存游标 —— 即使后面还有页，也要先落盘，
-            // 这样万一被系统杀掉，下次不会从头再来
+            // 这样万一被系统杀掉，下次不会从头再来。
+            // ⚠️ 但**授权未决时只前进内存里的游标、不落盘**：
+            //    落盘会让"之后才授权"永远补不回授权前的历史（见 syncAll 的说明）；
+            //    而不前进内存游标又会让**同一轮的分页反复拉同一页**（死循环）。
+            //    两者都要满足，所以拆成"内存游标始终前进 / 落盘看授权"。
             if let newAnchor = result.newAnchor {
-                try await store.saveAnchor(newAnchor, for: metric.id)
+                if canAdvanceAnchor {
+                    try await store.saveAnchor(newAnchor, for: metric.id)
+                }
                 anchor = newAnchor
             }
 
@@ -241,6 +278,191 @@ actor HealthSyncEngine {
             print("[Sync] \(metric.id)：新增 \(totalNew) 条")
         }
         return deletedUUIDs
+    }
+
+    // MARK: - 心跳序列（RR 间期的唯一自动来源）
+
+    /// anchor 用的键。**不是指标 id** —— 心跳序列是 `HKSeriesType`，
+    /// 进不了 `MetricCatalog`（那张表是按 quantity/category 设计的：
+    /// 一条样本一个数值，而一条序列里有几百个时间戳）。
+    private static let heartbeatAnchorKey = "heartbeat_series"
+
+    /// 首次同步回看几天
+    private static let heartbeatLookbackDays = 7
+
+    /// 单轮最多**展开**多少条序列的逐拍数据。
+    ///
+    /// 为什么必须限量：展开走 `HKHeartbeatSeriesQuery`，它是**逐拍回调**的
+    /// （一条序列几百次回调）。而手表后台总共只有"几秒"。
+    /// 普通样本是一次回调返回一批，两者成本不是一个量级。
+    private static let maxSeriesToExpandPerRound = 6
+
+    /// 单轮最多取回多少条序列的**元信息**（不展开，只是看看有哪些）
+    private static let heartbeatPageSize = 20
+
+    /// 同步心跳序列。返回本轮**新存入**的条数。
+    ///
+    /// ## 两步查询
+    /// ① `HKAnchoredObjectQuery`（type = `HKSeriesType.heartbeat()`）拿到"有哪些序列"；
+    /// ② 对每一条**还没存过**的跑 `HKHeartbeatSeriesQuery` 取逐拍时间戳。
+    ///
+    /// ## 游标只在"这一页全都处理完"时才前进
+    /// 如果因为时间不够、或超过了展开上限而留下没处理的序列，就**不保存新 anchor**
+    /// —— 下一轮会重新拿到同一页，但已经存过的会被 `storedHeartbeatSeriesUUIDs` 跳过，
+    /// 所以一定能推进。
+    /// 反过来如果无条件保存 anchor，被跳过的那几条就**永远不会再被看到**了。
+    @discardableResult
+    private func syncHeartbeatSeries(deadline: Date, canAdvanceAnchor: Bool) async throws -> Int {
+        var anchor: HKQueryAnchor?
+        do {
+            anchor = try await store.anchor(for: Self.heartbeatAnchorKey)
+        } catch {
+            print("[Heartbeat] 游标损坏，清除后按首次同步重来：\(error.localizedDescription)")
+            try? await store.clearAnchor(for: Self.heartbeatAnchorKey)
+            anchor = nil
+        }
+
+        let predicate: NSPredicate?
+        if anchor == nil {
+            let from = Calendar.current.date(byAdding: .day,
+                                             value: -Self.heartbeatLookbackDays,
+                                             to: .now) ?? .distantPast
+            predicate = HKQuery.predicateForSamples(withStart: from, end: nil, options: .strictStartDate)
+        } else {
+            predicate = nil
+        }
+
+        let result = try await fetchIncremental(type: MetricCatalog.heartbeatSeriesType,
+                                                predicate: predicate,
+                                                anchor: anchor,
+                                                limit: Self.heartbeatPageSize)
+
+        // ⚠️ 防御：满页但**没有新游标**时，下一轮查询会和这一轮完全一样。
+        //    正常路径上游标一定前进，但代码不该把"正常"当唯一可能。
+        if result.samples.count >= Self.heartbeatPageSize && result.newAnchor == nil {
+            print("[Heartbeat] 满页但游标未前进，本轮不再推进（防死循环）")
+        }
+
+        let series = result.samples.compactMap { $0 as? HKHeartbeatSeriesSample }
+        guard !series.isEmpty else {
+            // ⚠️ 一条都没有时**只有授权已决**才落盘游标。
+            //    否则"还没授权 → 空结果 + 有效新游标 → 推进"
+            //    会让用户之后授权成功时**永久丢掉授权前的历史**（零报错）。
+            //    不落盘的代价只是每轮重查一次 7 天窗口，很便宜。
+            if let newAnchor = result.newAnchor, canAdvanceAnchor {
+                try await store.saveAnchor(newAnchor, for: Self.heartbeatAnchorKey)
+            }
+            return 0
+        }
+
+        let stored = (try? await store.storedHeartbeatSeriesUUIDs(among: series.map(\.uuid))) ?? []
+        let toProcess = series.filter { !stored.contains($0.uuid) }
+
+        var inserted = 0
+        var expandFailures = 0
+        var deferred = 0
+
+        for (index, sample) in toProcess.enumerated() {
+            if Date() > deadline || inserted >= Self.maxSeriesToExpandPerRound {
+                deferred = toProcess.count - index
+                break
+            }
+            do {
+                let record = try await expandHeartbeatSeries(sample)
+                inserted += try await store.upsertHeartbeatSeries([record])
+                try await store.enqueue([PendingUploadRecord(
+                    sampleUUID: record.uuid,
+                    metricID: WatchWire.heartbeatSeriesMarker,
+                    payload: record.payload.encoded()
+                )])
+            } catch {
+                // ⚠️ 刻意**跳过而不是死等重试**：失败几乎都是"这条序列的数据已经不可读"
+                //    （而不是暂时性故障 —— anchored query 刚刚才成功返回了它）。
+                //    若在这里留着不前进，游标会被这一条**永久卡住**，
+                //    同一页里后面的新序列也全都同步不到。
+                //    按「不追求完整性」原则：丢一条（约 100 拍）好过卡死整条通道。
+                expandFailures += 1
+                print("[Heartbeat] ⚠️ 展开失败，跳过 \(sample.uuid)：\(error.localizedDescription)")
+            }
+        }
+
+        if deferred == 0, let newAnchor = result.newAnchor, canAdvanceAnchor {
+            try await store.saveAnchor(newAnchor, for: Self.heartbeatAnchorKey)
+        }
+
+        if inserted > 0 || expandFailures > 0 || deferred > 0 {
+            print("[Heartbeat] 本页 \(series.count) 条：新增 \(inserted)"
+                  + "，已存跳过 \(series.count - toProcess.count)"
+                  + "，展开失败 \(expandFailures)"
+                  + (deferred > 0 ? "，留到下轮 \(deferred)" : ""))
+        }
+        return inserted
+    }
+
+    /// 把一条心跳序列展开成可落库的记录。
+    private func expandHeartbeatSeries(_ sample: HKHeartbeatSeriesSample) async throws -> HeartbeatSeriesRecord {
+        let stamps = try await fetchHeartbeats(of: sample)
+
+        // 相邻时间戳之差 = RR 间期（秒 → 毫秒）
+        var intervals: [Int] = []
+        if stamps.count >= 2 {
+            intervals.reserveCapacity(stamps.count - 1)
+            for index in 1..<stamps.count {
+                let delta = Int(((stamps[index] - stamps[index - 1]) * 1000).rounded())
+                // ⚠️ 只保留**正的**间隔：收尾那次回调不保证带有效时间戳
+                //    （可能是 0），那会算出 0 或负数。丢掉它们，别让脏数据进库。
+                if delta > 0 { intervals.append(delta) }
+            }
+        }
+
+        let source = sample.sourceRevision.source
+        let device = sample.device
+
+        return HeartbeatSeriesRecord(uuid: sample.uuid,
+                                     startDate: sample.startDate,
+                                     endDate: sample.endDate,
+                                     rrPacked: RRPacking.pack(intervals),
+                                     beatCount: stamps.count,
+                                     ingestedAt: .now,
+                                     sourceBundleID: source.bundleIdentifier,
+                                     sourceName: source.name,
+                                     deviceName: device?.name,
+                                     deviceModel: device?.model)
+    }
+
+    /// 读出一条心跳序列里的**逐拍时间戳**（相对序列起点的秒数）。
+    ///
+    /// ⚠️ `dataHandler` 是**逐拍回调**的，`done` 为 true 时才是最后一次。
+    /// continuation 必须**恰好 resume 一次**，所以用 `finished` 守住；
+    /// 并且 `error != nil` 时也要 resume —— 否则会永久挂住，把后台预算烧光
+    /// （然后被系统按退避算法收紧额度）。
+    private func fetchHeartbeats(of sample: HKHeartbeatSeriesSample) async throws -> [TimeInterval] {
+        try await withCheckedThrowingContinuation { continuation in
+            var stamps: [TimeInterval] = []
+            var finished = false
+
+            let query = HKHeartbeatSeriesQuery(heartbeatSeries: sample) { _, timeSinceStart, _, done, error in
+                if let error {
+                    if !finished {
+                        finished = true
+                        continuation.resume(throwing: error)
+                    }
+                    return
+                }
+
+                // ⚠️ 无论 done 与否都收下这个时间戳：Apple **没有文档说明**
+                //    "收尾那一次回调带不带有效时间戳"。
+                //    多收一个无意义的值，会在算 RR 时被 `delta > 0` 过滤掉；
+                //    少收一个则是**真的丢一拍**（少一个间期）。两害相权取其轻。
+                stamps.append(timeSinceStart)
+
+                if done && !finished {
+                    finished = true
+                    continuation.resume(returning: stamps)
+                }
+            }
+            healthStore.execute(query)
+        }
     }
 
     // MARK: - Anchored query 的 async 包装

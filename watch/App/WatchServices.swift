@@ -45,7 +45,10 @@ final class WatchServices {
         let schema = Schema([
             SampleRecord.self,
             SyncAnchorRecord.self,
-            PendingUploadRecord.self
+            PendingUploadRecord.self,
+            // 心跳序列（RR 间期的来源）。独立一张表：一条序列 = 一行
+            // （RR 数组打包在里面），见 Models.swift 的说明。
+            HeartbeatSeriesRecord.self
         ])
 
         // ⚠️ 关键：`isStoredInMemoryOnly` 必须是 `false` —— 数据要落在**手表的硬盘**上，

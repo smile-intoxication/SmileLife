@@ -122,3 +122,75 @@ final class PendingUploadRecord {
         self.lastError = lastError
     }
 }
+
+/// 一条心跳序列（逐拍时间戳 → RR 间期）。
+///
+/// ## 为什么是独立模型，不进 `SampleRecord`
+/// `SampleRecord` 的形状是「**一条样本 = 一个数值**」（`value` 或 `categoryValue`）。
+/// 而一条心跳序列里是**几百个时间戳**。硬塞进那个形状只有两种下场：
+/// 要么把序列拆成几百行（行数爆炸、而且丢掉了"它们属于同一次测量"这个信息），
+/// 要么给 `SampleRecord` 加一个"序列"分支（把那张表的核心语义搞糊）。
+///
+/// 所以 RR 间期**打包成一块 `Data` 存在一行里** —— 一次测量 = 一行。
+/// 打包方式见 `shared/RRSeries.swift` 的 `RRPacking`（2 字节/间期）。
+@Model
+final class HeartbeatSeriesRecord {
+
+    /// 索引：按时间范围查（诊断、保留清理）
+    #Index<HeartbeatSeriesRecord>([\.startDate])
+
+    /// 主键 = `HKObject.uuid`，和 `SampleRecord` 同样的幂等策略
+    @Attribute(.unique) var uuid: UUID
+
+    var startDate: Date
+    var endDate: Date
+
+    /// 逐拍间隔（毫秒），已打包
+    var rrPacked: Data
+    /// HealthKit 给出的原始拍数（用于校验，见 `HeartbeatSeriesPayload.isSelfConsistent`）
+    var beatCount: Int
+
+    // ——— 来源追踪 ———
+    var sourceBundleID: String?
+    var sourceName: String?
+    var deviceName: String?
+    var deviceModel: String?
+
+    var ingestedAt: Date
+
+    init(uuid: UUID,
+         startDate: Date,
+         endDate: Date,
+         rrPacked: Data,
+         beatCount: Int,
+         ingestedAt: Date = .now,
+         sourceBundleID: String? = nil,
+         sourceName: String? = nil,
+         deviceName: String? = nil,
+         deviceModel: String? = nil) {
+        self.uuid = uuid
+        self.startDate = startDate
+        self.endDate = endDate
+        self.rrPacked = rrPacked
+        self.beatCount = beatCount
+        self.ingestedAt = ingestedAt
+        self.sourceBundleID = sourceBundleID
+        self.sourceName = sourceName
+        self.deviceName = deviceName
+        self.deviceModel = deviceModel
+    }
+
+    /// 转成线上格式（入待上传队列时用）
+    var payload: HeartbeatSeriesPayload {
+        HeartbeatSeriesPayload(uuid: uuid,
+                               startDate: startDate,
+                               endDate: endDate,
+                               rrPacked: rrPacked,
+                               beatCount: beatCount,
+                               ingestedAt: ingestedAt,
+                               sourceBundleID: sourceBundleID,
+                               sourceName: sourceName,
+                               deviceName: deviceName,
+                               deviceModel: deviceModel)
+    }
+}

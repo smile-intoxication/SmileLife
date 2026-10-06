@@ -93,20 +93,35 @@ struct SampleBatch: Codable, Equatable, Sendable {
     var samples: [UploadPayload]
     var deletedUUIDs: [UUID]
 
+    /// 心跳序列（逐拍 → RR 间期）。
+    ///
+    /// ## ⚠️ 必须是 `Optional`，不能靠"给个默认值"
+    /// 本协议的约定是「**只增不改**」：新增字段一律做成可选，老版本解码时忽略它。
+    /// 关键点在于 **Swift 合成的 `Decodable` 对非可选属性用 `decode` 而不是 `decodeIfPresent`**
+    /// —— 也就是说写 `var heartbeatSeries: [...] = []` 这种"带默认值"的写法
+    /// **不能**让缺失的键被容忍，老版本一解码就抛错、整批数据丢掉。
+    /// 只有真正写成 `Optional` 才会走 `decodeIfPresent`。
+    /// （自检脚本第 13 节守着这一条。）
+    var heartbeatSeries: [HeartbeatSeriesPayload]?
+
     init(batchID: UUID = UUID(),
          sentAt: Date = Date(),
          samples: [UploadPayload],
          deletedUUIDs: [UUID] = [],
+         heartbeatSeries: [HeartbeatSeriesPayload]? = nil,
          version: Int = SampleBatch.currentVersion) {
         self.version = version
         self.batchID = batchID
         self.sentAt = sentAt
         self.samples = samples
         self.deletedUUIDs = deletedUUIDs
+        self.heartbeatSeries = heartbeatSeries
     }
 
-    /// 空批（既没有样本也没有删除）不该被发送 —— 那只是白占系统队列。
-    var isEmpty: Bool { samples.isEmpty && deletedUUIDs.isEmpty }
+    /// 空批（既没有样本、也没有删除、也没有心跳序列）不该被发送 —— 那只是白占系统队列。
+    var isEmpty: Bool {
+        samples.isEmpty && deletedUUIDs.isEmpty && (heartbeatSeries ?? []).isEmpty
+    }
 
     func encoded() -> Data { WireCodec.encode(self) }
 
@@ -138,6 +153,14 @@ enum WatchWire {
     /// 宁可多发几批，也不要撞在一个没有文档的上限上。
     /// 依据：<https://stackoverflow.com/questions/34683648/wcsession-payloadtoolarge>
     static let maxBytesPerBatch = 32 * 1024
+
+    /// 待上传队列里用来区分「心跳序列」行的标记（写进 `PendingUploadRecord.metricID`）。
+    ///
+    /// 队列的 `metricID` 字段本来是给指标用的，但心跳序列不是指标
+    /// （它是 `HKSeriesType`，进不了指标注册表）。用一个不可能与真实
+    /// 指标 id 冲突的标记（双下划线 + 描述名）复用同一张表，
+    /// 比再开一张 `@Model` 表划算 —— 后者要处理迁移，而收益只是"语义更干净"。
+    static let heartbeatSeriesMarker = "__heartbeat_series__"
 
     /// 系统队列里最多允许压着多少个未完成的传输。
     ///

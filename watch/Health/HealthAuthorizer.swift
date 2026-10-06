@@ -53,6 +53,23 @@ actor HealthAuthorizer {
         try await requestReadAuthorization()
     }
 
+    /// 用户**还没对读权限做出决定**。
+    ///
+    /// ## ⚠️ 这个判断是给同步引擎用的，用来决定"能不能推进游标"
+    /// HealthKit 对**没授权的类型返回空数组、而不是错误**，而且同时给出一个
+    /// **有效的新 `HKQueryAnchor`**。于是会出现这条极隐蔽的路径：
+    ///
+    /// 1. 后台刷新先跑了一轮（用户还没打开过 app、还没点授权）；
+    /// 2. 每个类型都"成功"返回 0 条 + 新游标 → 游标被推进；
+    /// 3. 用户之后授权成功 → 从那个游标往后查**只会拿到新数据**；
+    /// 4. 授权之前那段历史**永远补不回来**，而且**没有任何报错**。
+    ///
+    /// 所以授权未决时**不推进游标**，代价只是"每轮重新查一次有限的回看窗口"
+    /// —— 而这段时间很短（到用户第一次打开 app 为止）。
+    func isAuthorizationPending() async -> Bool {
+        await !hasRequestedBefore()
+    }
+
     // MARK: - ⚠️ 关于「判断读授权」的一个陷阱
     //
     // **不要**用 `HKHealthStore.authorizationStatus(for:)` 判断"读权限有没有拿到"。

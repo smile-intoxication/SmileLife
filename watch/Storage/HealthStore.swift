@@ -163,6 +163,63 @@ actor HealthStore {
         return try modelContext.fetch(d).first?.startDate
     }
 
+    // MARK: - 心跳序列（RR 间期的来源）
+
+    /// 幂等写入心跳序列。返回**真正新增**的条数。
+    ///
+    /// ## 为什么这里"已存在就跳过"，而 `upsert(_:)` 是"已存在就覆盖"
+    /// 两者面对的数据性质不同：
+    /// - `SampleRecord`：静息/步行心率会被系统**回填修正**（值会变），
+    ///   所以必须覆盖，否则本地永远停在第一次收到的旧值。
+    /// - `HeartbeatSeriesRecord`：逐拍时间戳一旦写入就不会变，
+    ///   而**重新展开一次逐拍数据的代价很高**（逐拍回调，几百拍一条序列）。
+    ///   同步逻辑会先用 `storedHeartbeatSeriesUUIDs` 问"这条存过没有"，
+    ///   存过就**不再展开** —— 跳过的意义主要在这里，而不在写入本身。
+    @discardableResult
+    func upsertHeartbeatSeries(_ records: [HeartbeatSeriesRecord]) throws -> Int {
+        guard !records.isEmpty else { return 0 }
+
+        let ids = records.map(\.uuid)
+        let existing = try modelContext.fetch(
+            FetchDescriptor<HeartbeatSeriesRecord>(predicate: #Predicate { ids.contains($0.uuid) })
+        )
+        let existingIDs = Set(existing.map(\.uuid))
+
+        var inserted = 0
+        for record in records where !existingIDs.contains(record.uuid) {
+            modelContext.insert(record)
+            inserted += 1
+        }
+        if inserted > 0 { try modelContext.save() }
+        return inserted
+    }
+
+    /// 这批 uuid 里**已经存过**的那些 —— 同步引擎靠它避免重复展开逐拍数据。
+    func storedHeartbeatSeriesUUIDs(among uuids: [UUID]) throws -> Set<UUID> {
+        guard !uuids.isEmpty else { return [] }
+        let existing = try modelContext.fetch(
+            FetchDescriptor<HeartbeatSeriesRecord>(predicate: #Predicate { uuids.contains($0.uuid) })
+        )
+        return Set(existing.map(\.uuid))
+    }
+
+    func heartbeatSeriesCount() throws -> Int {
+        try modelContext.fetchCount(FetchDescriptor<HeartbeatSeriesRecord>())
+    }
+
+    /// 最新一条心跳序列的（时间、拍数）—— 诊断界面用。
+    ///
+    /// 刻意返回**值类型**而不是 `HeartbeatSeriesRecord`：
+    /// `@Model` 实例不能跨 actor 传递（和 `MetricSampleStats` 同样的理由）。
+    func latestHeartbeatSeries() throws -> (startDate: Date, beatCount: Int)? {
+        var descriptor = FetchDescriptor<HeartbeatSeriesRecord>(
+            sortBy: [SortDescriptor(\.startDate, order: .reverse)]
+        )
+        descriptor.fetchLimit = 1
+        guard let record = try modelContext.fetch(descriptor).first else { return nil }
+        return (record.startDate, record.beatCount)
+    }
+
     // MARK: - 保留策略
 
     /// 只保留最近 `StoragePolicy.retentionDays`（**7 天**）的样本。
@@ -170,7 +227,7 @@ actor HealthStore {
     /// - 删的只是**你自己的副本**，HealthKit 里的数据不受影响；
     ///   长期档案本来就在 iPhone 上（官方："old data is periodically purged from Apple Watch"）。
     /// - 有 `#Index<SampleRecord>([\.startDate])` 撑着，这条删除不会全表扫描。
-    /// - 返回实际删掉的行数，方便日志里观察效果。
+    /// - 返回实际删掉的行数（**样本 + 心跳序列**），方便日志里观察效果。
     @discardableResult
     func enforceRetention() throws -> Int {
         guard let cutoff = Calendar.current.date(byAdding: .day,
@@ -179,9 +236,19 @@ actor HealthStore {
         let before = try modelContext.fetchCount(FetchDescriptor<SampleRecord>())
         try modelContext.delete(model: SampleRecord.self,
                                 where: #Predicate { $0.startDate < cutoff })
-        try modelContext.save()
         let after = try modelContext.fetchCount(FetchDescriptor<SampleRecord>())
-        return max(0, before - after)
+
+        // 心跳序列同样按 7 天清 —— 它和样本是同一套保留语义
+        // （手表是滚动缓存、手机才是长期档案）。
+        // ⚠️ 手机端的删除**不是**在这里发生的：这里清的是手表自己的副本，
+        //    和"用户主动删数据"（HKDeletedObject）是两回事，见 HealthSyncEngine 的说明。
+        let seriesBefore = try modelContext.fetchCount(FetchDescriptor<HeartbeatSeriesRecord>())
+        try modelContext.delete(model: HeartbeatSeriesRecord.self,
+                                where: #Predicate { $0.startDate < cutoff })
+        let seriesAfter = try modelContext.fetchCount(FetchDescriptor<HeartbeatSeriesRecord>())
+
+        try modelContext.save()
+        return max(0, before - after) + max(0, seriesBefore - seriesAfter)
     }
 
     // MARK: - 待上传队列
@@ -221,9 +288,18 @@ actor HealthStore {
         var rows: [OutboxRow] = []
         var broken: [UUID] = []
         for record in records {
-            if let payload = UploadPayload.decode(record.payload) {
+            // 队列里混着**两种载荷**，用 `metricID` 上的标记区分
+            // （心跳序列不是指标，见 `WatchWire.heartbeatSeriesMarker` 的说明）。
+            let item: OutboxItem?
+            if record.metricID == WatchWire.heartbeatSeriesMarker {
+                item = HeartbeatSeriesPayload.decode(record.payload).map { .heartbeatSeries($0) }
+            } else {
+                item = UploadPayload.decode(record.payload).map { .sample($0) }
+            }
+
+            if let item {
                 rows.append(OutboxRow(id: record.id,
-                                      payload: payload,
+                                      item: item,
                                       byteCount: record.payload.count))
             } else {
                 broken.append(record.id)

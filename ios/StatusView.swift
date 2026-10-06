@@ -16,6 +16,8 @@ struct StatusView: View {
 
     @State private var totalSamples = 0
     @State private var rollupCount = 0
+    /// 心跳序列条数（RR 间期的来源）。和"样本总数"是两张表，分开显示。
+    @State private var heartbeatSeries = 0
     @State private var oldestDate: Date?
     @State private var newestDate: Date?
     @State private var summaries: [PhoneMetricSummary] = []
@@ -84,6 +86,7 @@ struct StatusView: View {
     private var storeSection: some View {
         Section {
             row("样本总数", PhoneFormat.number(totalSamples))
+            row("心跳序列", PhoneFormat.number(heartbeatSeries))
             row("汇总桶", PhoneFormat.number(rollupCount))
             row("磁盘占用", PhoneFormat.bytes(storeBytes))
             row("最早样本", PhoneFormat.relative(oldestDate))
@@ -179,6 +182,7 @@ struct StatusView: View {
         do {
             totalSamples = try await store.totalSampleCount()
             rollupCount = try await store.rollupCount()
+            heartbeatSeries = try await store.heartbeatSeriesCount()
             oldestDate = try await store.oldestSampleDate()
             newestDate = try await store.newestSampleDate()
             summaries = try await store.metricSummaries()

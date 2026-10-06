@@ -21,11 +21,74 @@ struct ChartView: View {
     /// 拍平后的睡眠片段（`Chart` 直接吃这个，不现算 —— 见 `SleepChartSegment` 的注释）
     @State private var sleepSegments: [SleepChartSegment] = []
     @State private var stats: ChartStats?
+    /// RR 间期散点图的数据。**在类型明确的地方算好**，视图只负责渲染
+    /// —— 这是 `sleepContent` 那次类型推导超时留下的教训。
+    @State private var poincare: PoincareResult?
+    /// 是否剔除早搏／伪影。做成开关：关掉时看到的**原始**早搏分布本身也有分析价值。
+    @State private var filterEctopic = true
+    /// 本机有没有收到过心跳序列 —— 决定选择器里要不要出现 RR 那一项
+    @State private var hasRRSeries = false
+    /// RR 序列查询是否因为条数上限被截断（要在界面上如实说明）
+    @State private var rrTruncated = false
     @State private var isLoading = false
     @State private var hasLoadedOnce = false
     @State private var loadError: String?
 
     private var info: MetricDisplay.Info { MetricDisplay.infoOrFallback(id: metricID) }
+
+    /// 当前画的是哪一类图。
+    ///
+    /// 用枚举而不是直接读 `info.kind`：RR 间期**不是 HealthKit 指标**
+    /// （见 `RRPoincare` 的说明），它在 `MetricDisplay` 里查不到，
+    /// 硬套那个类型只能拿到一个 fallback —— 判断就变成"靠兜底值碰巧对"。
+    private enum ChartKind { case quantity, category, rrPoincare }
+
+    private var kind: ChartKind {
+        if metricID == RRPoincare.metricID { return .rrPoincare }
+        return info.kind == .category ? .category : .quantity
+    }
+
+    /// 选择器里的一项。
+    private struct ChartPickerItem: Identifiable {
+        let id: String
+        let title: String
+        let symbolName: String
+    }
+
+    /// 选择器的内容。
+    ///
+    /// RR 间期那一项**只在真的收到过心跳序列时才出现**：这条链路依赖手表
+    /// 产生 `HKHeartbeatSeriesSample`（很可能需要开房颤历史），
+    /// 对一个"可能永远没有"的功能，留一个永远为空的入口比没有入口更糟。
+    private var pickerItems: [ChartPickerItem] {
+        var items = MetricDisplay.all.map {
+            ChartPickerItem(id: $0.id, title: $0.title, symbolName: $0.symbolName)
+        }
+        if hasRRSeries {
+            items.append(ChartPickerItem(id: RRPoincare.metricID,
+                                         title: RRPoincare.title,
+                                         symbolName: RRPoincare.symbolName))
+        }
+        return items
+    }
+
+    private var selectedItem: ChartPickerItem {
+        pickerItems.first { $0.id == metricID }
+            ?? ChartPickerItem(id: metricID, title: metricID, symbolName: "questionmark.circle")
+    }
+
+    /// y = x 参考线的两个端点。
+    ///
+    /// 单独建一个类型（配 `ForEach`）而不是直接写两条裸 `LineMark`：
+    /// 后者要靠 Swift Charts 的隐式"同一序列"推导才会连成线，
+    /// 显式给数据不依赖这个推导。
+    private struct DiagonalPoint: Identifiable {
+        let id: Int
+        let value: Double
+    }
+
+    private let diagonalPoints = [DiagonalPoint(id: 0, value: 0),
+                                  DiagonalPoint(id: 1, value: 2000)]
 
     var body: some View {
         NavigationStack {
@@ -33,10 +96,10 @@ struct ChartView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     selectors
 
-                    if info.kind == .category {
-                        sleepContent
-                    } else {
-                        quantityContent
+                    switch kind {
+                    case .category:   sleepContent
+                    case .rrPoincare: poincareContent
+                    case .quantity:   quantityContent
                     }
 
                     if let loadError {
@@ -67,8 +130,8 @@ struct ChartView: View {
     /// SwiftUI 的类型推导变慢甚至超时（同一个文件里的 `sleepContent` 就超时过）。
     private var metricMenuLabel: some View {
         HStack {
-            Image(systemName: info.symbolName)
-            Text(info.title).font(.headline)
+            Image(systemName: selectedItem.symbolName)
+            Text(selectedItem.title).font(.headline)
             Spacer()
             Image(systemName: "chevron.up.chevron.down").font(.caption)
         }
@@ -80,9 +143,12 @@ struct ChartView: View {
     private var selectors: some View {
         VStack(alignment: .leading, spacing: 10) {
             Menu {
-                ForEach(MetricDisplay.all) { item in
+                ForEach(pickerItems) { item in
                     Button {
                         metricID = item.id
+                        // 心跳序列是被动采样、主要在睡眠中出现，一天可能只有几条 ——
+                        // 24 小时窗口经常是空的。切到这一项时自动放宽到 7 天。
+                        if item.id == RRPoincare.metricID { range = .week }
                     } label: {
                         Label(item.title, systemImage: item.symbolName)
                     }
@@ -188,6 +254,126 @@ struct ChartView: View {
         }
     }
 
+    // MARK: - RR 间期：Poincaré 散点图
+
+    /// RR 间期散点图（Poincaré）。
+    ///
+    /// 横轴 = 第 n 个间期，纵轴 = 第 n+1 个间期，**两轴都是 0–2000 ms**（需求方指定）。
+    /// 这是看 HRV 形态最直观的一张图：
+    /// - 点贴着 y=x 对角线 → 相邻两个间期几乎一样 → 心率很稳
+    /// - 垂直于对角线散开 → 相邻间期差得越多 → 变异越大
+    /// - 偏离对角线的孤立点 → 早搏 / 运动伪影
+    @ViewBuilder
+    private var poincareContent: some View {
+        if let result = poincare, !result.isEmpty {
+            // 参考线和散点必须画在**同一个坐标系**里，所以用 `Chart { }` 而不是
+            // `Chart(result.points) { ... }` 那个便利初始化器。
+            Chart {
+                ForEach(diagonalPoints) { point in
+                    LineMark(x: .value("RRₙ", point.value),
+                             y: .value("RRₙ₊₁", point.value))
+                        .foregroundStyle(Color.secondary.opacity(0.7))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                }
+
+                ForEach(result.points) { point in
+                    PointMark(x: .value("RRₙ", point.rrN),
+                              y: .value("RRₙ₊₁", point.rrNext))
+                        .symbolSize(6)
+                        .foregroundStyle(Color.teal.opacity(0.45))
+                }
+            }
+            // ⚠️ 必须写 `0.0...2000.0`：只写 `0...2000` 会被推断成 `ClosedRange<Int>`，
+            //    和 Double 的数据点对不上（这类错只有编译器能发现）。
+            .chartXScale(domain: 0.0...2000.0)
+            .chartYScale(domain: 0.0...2000.0)
+            .chartXAxisLabel("RRₙ (ms)")
+            .chartYAxisLabel("RRₙ₊₁ (ms)")
+            .frame(height: 320)
+
+            rrStats(result)
+            rrFilterToggle
+        } else if isLoading || !hasLoadedOnce {
+            loadingPlaceholder
+        } else {
+            rrEmptyPlaceholder
+        }
+    }
+
+    private func rrStats(_ result: PoincareResult) -> some View {
+        HStack(spacing: 10) {
+            rrStatBox("平均心率",
+                      value: result.meanHeartRate.map { String(format: "%.0f", $0) } ?? "—",
+                      unit: "bpm")
+            rrStatBox("SDNN",
+                      value: result.sdnn.map { String(format: "%.0f", $0) } ?? "—",
+                      unit: "ms")
+            rrStatBox("点数", value: "\(result.points.count)", unit: "个")
+        }
+    }
+
+    private func rrStatBox(_ title: String, value: String, unit: String) -> some View {
+        VStack(spacing: 3) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.system(.body, design: .rounded, weight: .semibold))
+            Text(unit).font(.caption2).foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var rrFilterToggle: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("剔除早搏 / 伪影（相邻变化超过 20%）", isOn: $filterEctopic)
+                .font(.footnote)
+                .onChange(of: filterEctopic) { _, _ in Task { await load() } }
+            Text(rrFilterSummary)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    /// 如实说明"这批数据发生了什么"。
+    ///
+    /// 这一段不是装饰：散点图好不好看，可能是**数据本身**（早搏很多），
+    /// 也可能是**我们的过滤**。不把剔除数量写出来，两件事就分不清，
+    /// 而"图不对"的排查会从这一步开始走弯路。
+    private var rrFilterSummary: String {
+        guard let result = poincare else { return "" }
+        var parts: [String] = []
+        parts.append("\(result.seriesCount) 条序列 / \(result.rawIntervals) 个间期")
+        if rrTruncated {
+            // 静默截断比报错更糟：用户会以为"数据就这么多"
+            parts.append("⚠️ 序列条数达到上限，只画了范围内最早的一部分，缩小范围更准")
+        }
+        if result.outOfRange > 0 {
+            parts.append("超出 \(Int(PoincareBuilder.minRR))–\(Int(PoincareBuilder.maxRR)) ms 剔除 \(result.outOfRange) 个")
+        }
+        if result.ectopicPairs > 0 {
+            parts.append(filterEctopic
+                         ? "按早搏剔除 \(result.ectopicPairs) 对"
+                         : "检出相邻变化超过 20% 的 \(result.ectopicPairs) 对（当前未剔除）")
+        }
+        if result.isDownsampled {
+            parts.append("点数超过 \(PoincareBuilder.maxPoints)，已均匀抽稀")
+        }
+        return parts.joined(separator: "；")
+    }
+
+    private var rrEmptyPlaceholder: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("这个时间段里没有心跳序列", systemImage: "waveform.path.ecg")
+                .font(.headline)
+            Text("心跳序列是被动采样，Apple 只在特定条件下才写（很可能需要开启「房颤历史」），"
+                 + "而且通常集中在睡眠中 —— 一天可能只有很少几条。换个更长的时间范围试试。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 24)
+    }
+
     // MARK: - 小块
 
     private func statisticsRow(_ stats: ChartStats) -> some View {
@@ -246,7 +432,9 @@ struct ChartView: View {
 
     private var provenanceNote: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if info.kind == .quantity, !points.isEmpty {
+            // 用 `kind` 而不是 `info.kind`：RR 间期在 MetricDisplay 里查不到
+            // （它不是 HealthKit 指标），读 info 只会拿到 fallback。
+            if kind == .quantity, !points.isEmpty {
                 Text("折线是每 \(bucketDescription)一格的平均值；浅色带是该格内的最低~最高值。")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -269,8 +457,30 @@ struct ChartView: View {
         let store = PhoneServices.shared.store
         let window = range.window()
 
+        // 先更新"本机有没有心跳序列"：它决定选择器里那一项在不在。
+        // 放最前面是因为下面可能要靠它把选中项回退掉。
+        hasRRSeries = ((try? await store.heartbeatSeriesCount()) ?? 0) > 0
+
+        // 数据被保留策略清掉、或者还没同步过来时，选中的那一项可能已经不在列表里了
+        // —— 那样菜单标题会退化成原始 id（`__rr_poincare__`），很难看。
+        // 回退到心率，并由 `onChange(of: metricID)` 再触发一次加载。
+        if metricID == RRPoincare.metricID && !hasRRSeries {
+            metricID = "heart_rate"
+            return
+        }
+
         do {
-            if info.kind == .category {
+            switch kind {
+            case .rrPoincare:
+                let fetch = try await store.rrSeries(from: window.from, to: window.to)
+                poincare = PoincareBuilder.build(from: fetch.series, filterEctopic: filterEctopic)
+                rrTruncated = fetch.isTruncated
+                points = []
+                sleepDays = []
+                sleepSegments = []
+                stats = nil
+
+            case .category:
                 let samples = try await store.categorySamples(metricID: metricID,
                                                               from: window.from,
                                                               to: window.to)
@@ -280,7 +490,9 @@ struct ChartView: View {
                 sleepSegments = ChartSeriesBuilder.sleepSegments(from: days)
                 points = []
                 stats = nil
-            } else {
+                poincare = nil
+
+            case .quantity:
                 let rollups = try await store.rollups(metricID: metricID,
                                                       from: window.from,
                                                       to: window.to)
@@ -290,6 +502,7 @@ struct ChartView: View {
                 stats = ChartSeriesBuilder.stats(from: built)
                 sleepDays = []
                 sleepSegments = []
+                poincare = nil
             }
             loadError = nil
         } catch {

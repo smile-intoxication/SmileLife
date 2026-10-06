@@ -25,7 +25,9 @@ final class PhoneServices {
     private init() {
         let schema = Schema([
             PhoneSample.self,
-            PhoneRollup.self
+            PhoneRollup.self,
+            // 心跳序列（RR 间期的来源）。一条序列 = 一行，RR 数组打包在里面。
+            PhoneHeartbeatSeries.self
         ])
 
         // ⚠️ 关键：`isStoredInMemoryOnly` 必须是 `false`。
@@ -64,6 +66,11 @@ final class PhoneServices {
     /// 而且有一个重要的兜底事实：**这些数据在 iPhone 自己的健康 App 里也有一份**
     /// （手表数据会通过 iCloud 同步到手机 HealthKit）。所以最坏情况不是"数据没了"，
     /// 而是"这个 app 的档案没了"。
+    ///
+    /// ⚠️ 注意：我们本地库的 schema 里**加了新表**（`PhoneHeartbeatSeries`），
+    /// SwiftData 的轻量迁移通常能自动处理"新增一个 @Model"。
+    /// 万一迁移失败，上面这条自愈路径会把旧库改名备份后重建 ——
+    /// 也就是**旧数据会被保留在 `.broken-<时间戳>` 文件里**，不会凭空消失。
     private static func recover(schema: Schema,
                                 configuration: ModelConfiguration) -> ModelContainer {
         let basePath = configuration.url.path

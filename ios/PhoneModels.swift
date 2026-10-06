@@ -150,6 +150,80 @@ final class PhoneRollup {
     }
 }
 
+/// 一条心跳序列（逐拍 → RR 间期）在手机上的副本。
+///
+/// ## 和 `PhoneSample` 的关系：**互不从属**
+/// `PhoneSample` 是"**一个数值**"，这是"**一串时间戳**"。
+/// 一条序列 = 一行（RR 数组打包在里面），刻意**不是**一个间期一行 ——
+/// 后者会让手机上的行数再涨一个数量级（一次测量几十上百个间期），
+/// 而换来的只是"能按行查单个间期"，我们从来不需要那样查。
+///
+/// ## 保留策略
+/// 和原始样本一样按 `PhoneStoragePolicy.rawRetentionDays` 清理。
+/// 它在手机上是"长期档案的原始证据"，但一年下来量也不小
+/// （一晚 120 条序列 → 一年 4 万多行），所以同样有上限。
+@Model
+final class PhoneHeartbeatSeries {
+
+    /// 索引：按时间范围取（画散点图、保留清理）
+    #Index<PhoneHeartbeatSeries>([\.startDate])
+
+    /// 主键 = `HKObject.uuid`，和 `PhoneSample` 同样的幂等策略
+    @Attribute(.unique) var uuid: UUID
+
+    var startDate: Date
+    var endDate: Date
+
+    /// 逐拍间隔（毫秒），已按 `RRPacking` 打包（2 字节/间期）
+    var rrPacked: Data
+    /// HealthKit 给出的原始拍数。用于自洽校验：
+    /// 正常情况解出来应该是 `beatCount` 或 `beatCount - 1` 条间期。
+    var beatCount: Int
+
+    var sourceName: String?
+    var deviceName: String?
+    var deviceModel: String?
+
+    /// **本机收到**的时间（和 `PhoneSample` 同一个用途：观测端到端延迟）
+    var receivedAt: Date
+
+    init(payload: HeartbeatSeriesPayload, receivedAt: Date = .now) {
+        self.uuid = payload.uuid
+        self.startDate = payload.startDate
+        self.endDate = payload.endDate
+        self.rrPacked = payload.rrPacked
+        self.beatCount = payload.beatCount
+        self.sourceName = payload.sourceName
+        self.deviceName = payload.deviceName
+        self.deviceModel = payload.deviceModel
+        self.receivedAt = receivedAt
+    }
+
+    /// 重复投递。
+    ///
+    /// 心跳序列的逐拍时间戳**不会变**（不像静息心率那样会被系统回填修正），
+    /// 所以这里只需要刷新"收到时间"，不需要覆盖数据。
+    func apply(_ payload: HeartbeatSeriesPayload, receivedAt: Date) {
+        self.receivedAt = receivedAt
+        // 万一手表那边修正过（例如修了展开逻辑后重新展开），以新数据为准。
+        // 逐拍数据没变时这次赋值是幂等的。
+        if payload.rrPacked != self.rrPacked || payload.beatCount != self.beatCount {
+            self.rrPacked = payload.rrPacked
+            self.beatCount = payload.beatCount
+        }
+    }
+
+    /// 解包出来的逐拍间隔
+    var rrMillis: [Int] { RRPacking.unpack(rrPacked) }
+
+    /// 拍数与间期数是否自洽 —— 不自洽的序列**不该被画进图里**
+    /// （会画出一堆凭空捏造的间期）。
+    var isSelfConsistent: Bool {
+        let count = rrPacked.count / 2
+        return count >= 1 && (count == beatCount || count == beatCount - 1)
+    }
+}
+
 /// 手机端的存储策略。
 ///
 /// ⚠️ 和手表端的 `StoragePolicy`（7 天）是**两个不同的数字**，不要合并：

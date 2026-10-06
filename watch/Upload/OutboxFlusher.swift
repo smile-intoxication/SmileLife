@@ -1,12 +1,23 @@
 import Foundation
 
+/// 待上传队列里的一行**载荷**。
+///
+/// 队列里混着两种东西，用 `PendingUploadRecord.metricID` 上的标记区分
+/// （见 `WatchWire.heartbeatSeriesMarker`）：
+/// - 普通样本（一条 = 一个数值）
+/// - 心跳序列（一条 = 几百个逐拍时间戳）
+enum OutboxItem: Sendable {
+    case sample(UploadPayload)
+    case heartbeatSeries(HeartbeatSeriesPayload)
+}
+
 /// 待上传队列里的一行，已经解码成线上格式。
 ///
 /// 刻意做成 `Sendable` 的值类型：`PendingUploadRecord` 是 SwiftData 的 `@Model`，
 /// **不能跨 actor 传递**（和 `HealthStore` 里 `MetricSampleStats` 同样的理由）。
 struct OutboxRow: Sendable {
     let id: UUID
-    let payload: UploadPayload
+    let item: OutboxItem
     /// 已编码负载的字节数，用于分批时估算大小
     let byteCount: Int
 }
@@ -38,6 +49,7 @@ actor OutboxFlusher {
     struct Report: Sendable {
         var batches = 0
         var samples = 0
+        var heartbeatSeries = 0
         var deletions = 0
         /// 为什么停下来。`nil` 表示队列已经发空。
         var stopReason: String?
@@ -143,8 +155,18 @@ actor OutboxFlusher {
                     break
                 }
 
-                let payloads = group.map(\.payload)
-                let batch = SampleBatch(samples: payloads, deletedUUIDs: pendingDeletions)
+                // 一个批次里可以**同时**有样本和心跳序列 —— `SampleBatch` 两个字段都带
+                var payloads: [UploadPayload] = []
+                var series: [HeartbeatSeriesPayload] = []
+                for row in group {
+                    switch row.item {
+                    case .sample(let payload):       payloads.append(payload)
+                    case .heartbeatSeries(let item): series.append(item)
+                    }
+                }
+                let batch = SampleBatch(samples: payloads,
+                                        deletedUUIDs: pendingDeletions,
+                                        heartbeatSeries: series)
 
                 guard link.enqueue(batch) else {
                     report.stopReason = "系统未接收（会话未激活）"
@@ -159,6 +181,7 @@ actor OutboxFlusher {
                 pendingDeletions = []
                 report.batches += 1
                 report.samples += payloads.count
+                report.heartbeatSeries += series.count
                 report.deletions += batch.deletedUUIDs.count
             }
 
@@ -181,7 +204,8 @@ actor OutboxFlusher {
             print("[Outbox] ⚠️ 发送中止：\(reason)")
         } else if report.didSendAnything {
             print("[Outbox] 已交给系统：\(report.batches) 批 / "
-                  + "\(report.samples) 条样本 / \(report.deletions) 条删除"
+                  + "\(report.samples) 条样本 / \(report.heartbeatSeries) 条心跳序列 / "
+                  + "\(report.deletions) 条删除"
                   + (report.stopReason.map { "（\($0)）" } ?? ""))
         }
         return report

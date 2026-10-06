@@ -45,6 +45,11 @@ struct DiagnosticsView: View {
             // ——— 2. 本地库（手表硬盘）———
             Section("本地库") {
                 row("样本总数", "\(report.totalSamples) 条")
+                // 心跳序列单独一行：它是**另一张表**，不计入上面的"样本总数"
+                row("心跳序列", "\(report.localHeartbeatSeries) 条")
+                if let at = report.localHeartbeatLatest {
+                    row("最新序列", Self.relative(at))
+                }
                 row("磁盘占用", Self.bytes(report.storeBytes))
                 row("保留天数", "\(StoragePolicy.retentionDays) 天")
                 if let path = report.storePath {
@@ -271,6 +276,11 @@ struct DiagnosticsView: View {
         }
         r.totalSamples = r.rows.reduce(0) { $0 + $1.count }
 
+        // 心跳序列（本地库这一层）—— 和「HealthKit 直查」那节的条数**不是一回事**：
+        // 一个是"我们抄下来了几条"，一个是"设备有没有产生"。
+        r.localHeartbeatSeries = (try? await services.store.heartbeatSeriesCount()) ?? 0
+        r.localHeartbeatLatest = (try? await services.store.latestHeartbeatSeries())?.startDate
+
         // ——— 传往 iPhone 的通道 ———
         let link = WatchLinkSession.shared
         r.linkSupported = link.isSupported
@@ -351,6 +361,15 @@ struct DiagnosticsReport {
     var storeBytes: Int64 = 0
     var totalSamples = 0
     var rows: [MetricDiagnosticsRow] = []
+
+    /// 本地库里的心跳序列（RR 间期的来源）。
+    ///
+    /// ⚠️ 它和下面「HealthKit 直查」里那个条数是**两个层次**：
+    /// 这里回答"**我们抄下来了几条**"，那里回答"**设备到底有没有产生**"。
+    /// 两个数字不一样时，问题在"同步"而不在"数据源"——
+    /// 这正是诊断界面刻意分三层的原因。
+    var localHeartbeatSeries = 0
+    var localHeartbeatLatest: Date?
 
     // ——— 传往 iPhone 的通道 ———
     var linkSupported = false

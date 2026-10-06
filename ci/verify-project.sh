@@ -505,6 +505,18 @@ else
   bad "iPhone 端没有校验 SampleBatch.currentVersion —— 版本不匹配时会静默丢数据"
 fi
 
+# 线协议"**只增不改**"的机械保证：`SampleBatch` 的新字段必须是 `Optional`。
+#
+# ⚠️ Swift 合成的 `Decodable` 对**非可选**属性用 `decode` 而不是 `decodeIfPresent`
+# —— 也就是说 `var x: [T] = []` 这种"带默认值"的写法**不能**容忍缺失的键。
+# 手表比手机新时，老手机一解码就抛错、**整批数据丢掉**（而不是忽略新字段）。
+PROTO_OPT=$(code_only shared/WatchWire.swift | grep -cE 'var heartbeatSeries: \[HeartbeatSeriesPayload\]\?')
+if [ "$PROTO_OPT" -ge 1 ]; then
+  ok "SampleBatch.heartbeatSeries 是 Optional（老版本解码器能安全忽略）"
+else
+  bad "SampleBatch.heartbeatSeries 不是 Optional —— 老版本解码会失败、整批数据丢掉"
+fi
+
 # ---------- 14. WCSession 属性的平台不对称 ----------
 # WCSession 的属性在 iOS 与 watchOS 上**不是同一套**，用错方向只会在
 # "编译另一个平台"时报错 —— 对于一个只属于某个 target 的文件来说，
@@ -563,6 +575,22 @@ if code_only watch/Health/HealthProbe.swift | grep -q 'MetricCatalog.heartbeatSe
   ok "探针用的是 MetricCatalog.heartbeatSeriesType（单一来源）"
 else
   bad "HealthProbe.swift 没有引用 MetricCatalog.heartbeatSeriesType"
+fi
+
+# 授权未决时**不能推进同步游标**。
+#
+# HealthKit 对**没授权的类型返回空数组 + 一个有效的新 `HKQueryAnchor`**。
+# 于是有一条极隐蔽的路径：后台刷新在用户点授权之前先跑一轮 → 每类都"成功"
+# 返回 0 条 + 新游标 → 游标被推进 → 用户之后授权成功，
+# 从那个游标往后查**只会拿到新数据**，授权前那段历史**永远补不回来，零报错**。
+#
+# 机械保证：同步引擎里必须有 `canAdvanceAnchor` 参与游标落盘，
+# 且授权状态来自 `HealthAuthorizer.isAuthorizationPending()`（与弹窗判断同一处逻辑）。
+if code_only watch/Health/HealthSyncEngine.swift | grep -q 'canAdvanceAnchor' \
+   && grep -q 'isAuthorizationPending' watch/Health/HealthAuthorizer.swift; then
+  ok "同步游标受授权状态保护（未授权时不落盘，避免永久丢掉授权前的历史）"
+else
+  bad "同步引擎没有用 canAdvanceAnchor 保护游标落盘 —— 未授权时推进游标会永久丢历史且零报错"
 fi
 
 # ---------- 汇总 ----------
