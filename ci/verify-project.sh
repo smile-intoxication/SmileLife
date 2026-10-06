@@ -272,6 +272,48 @@ else
   bad "workflow 没有调用 ci/prune-dev-certs.py"
 fi
 
+echo
+echo "== 16. 手表只搬运、不解释（数据通路的分层）"
+# 这条边界值得机械守住，因为它**很容易在无意中被写回去**：
+# 在手表上加一个"顺手算一下 RR / 求个中位数"看着无害，实际代价是
+# **以后每加一个分析都要改手表代码、再走一轮 watchOS 发布**。
+# 手表代码的迭代成本极高（用户得把 app 装到表上），手机随时能更新。
+#
+# 判据：手表侧**代码里**不出现 `RRPacking.pack`（那是"算完 RR 再打包"的标志）。
+# 手表只该用 `BeatPacking` 搬原始时间戳。
+#
+# ⚠️ 必须先用 `code_only` 剥掉注释再查 —— 第一版直接 `grep -rn`，
+#    结果被**解释这条规则的注释本身**触发了误报（注释里引用了 `RRPacking.pack`
+#    这个符号名）。规则说明文字不该把规则自己判失败。
+RR_IN_WATCH=""
+for f in $(find watch -name '*.swift' 2>/dev/null); do
+  if code_only "$f" | grep -q 'RRPacking\.pack'; then
+    RR_IN_WATCH="$RR_IN_WATCH $(basename "$f")"
+  fi
+done
+if [ -z "$RR_IN_WATCH" ]; then
+  ok "手表侧不计算 RR 间期（只搬运原始时间戳）"
+else
+  bad "手表侧还在打包 RR 间期（RRPacking.pack）：$RR_IN_WATCH —— RR 必须在手机上算"
+fi
+
+# 反向：手机上必须真的在算 RR。
+# 只查"手表没算"是不够的 —— 两边都不算的话图就是空的，而那是个**静默**的空。
+if grep -q 'intervals(fromOffsets' ios/Poincare.swift 2>/dev/null; then
+  ok "手机侧由时间戳推导 RR 间期（intervals(fromOffsets:)）"
+else
+  bad "手机侧没有推导 RR 间期 —— 手表不算是故意的，但手机必须算"
+fi
+
+# 时间戳载荷必须是 Optional：老版本手表发的是 rrPacked，没有这个字段。
+# 写成非可选会让 Swift 合成的 Decodable 用 decode 而不是 decodeIfPresent，
+# 老手表的整批数据会解码失败、**静默丢掉**。
+if grep -q 'var beatOffsetsPacked: Data?' shared/RRSeries.swift 2>/dev/null; then
+  ok "beatOffsetsPacked 是 Optional（兼容只发 rrPacked 的老手表）"
+else
+  bad "beatOffsetsPacked 必须是 Optional —— 老版本手表没有这个字段"
+fi
+
 rm -rf "$TMPD"
 
 # ---------- 9. App 图标（缺了会被 App Store 上传直接拒收） ----------

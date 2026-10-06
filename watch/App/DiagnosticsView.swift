@@ -170,7 +170,7 @@ struct DiagnosticsView: View {
 
                 if let hb = report.probe?.heartbeat {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("心跳序列 / RR 间期（近 \(hb.days) 天）").font(.caption2)
+                        Text("心跳序列（近 \(hb.days) 天）").font(.caption2)
                         Text("\(hb.seriesCount) 条序列").font(.system(size: 11, weight: .semibold))
                         if let at = hb.latestSampleDate {
                             Text("最新一条 \(Self.relative(at))")
@@ -193,16 +193,11 @@ struct DiagnosticsView: View {
                                 .font(.system(size: 9))
                                 .foregroundStyle(.secondary)
                         }
-                        if let beats = hb.beatsInLatestSeries {
-                            Text("最新一条含 \(beats) 拍")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
-                        }
-                        if let rr = hb.medianRRms {
-                            Text("中位 RR 间期 \(Int(rr)) ms")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
-                        }
+                        // ⚠️ 这里**刻意不显示 RR 间期 / 拍数 / HRV**。
+                        //    手表只负责把逐拍时间戳搬给手机，那之后的一切计算
+                        //    （RR、Poincaré、SDNN，以后还有 PSD）都在手机上做 ——
+                        //    所以手表界面上没有它们的容身之处。
+                        //    这一节只回答"HealthKit 里有没有、有多少、什么时候的"。
                         // ⚠️ 这条提醒不是凑字数的：v1.7 就是因为**没申请读这个类型的权限**，
                         //    导致这里显示 0 条，而 0 条被误读成"设备不产生这个数据"。
                         //    HealthKit 对没授权的类型返回空数组**而不是错误**，
@@ -211,7 +206,8 @@ struct DiagnosticsView: View {
                              + "HealthKit 不报错，只返回空数组 —— 所以别只看这一行下结论。")
                             .font(.system(size: 9))
                             .foregroundStyle(.tertiary)
-                        Text("被动逐拍数据预期需要开启「房颤历史」；移动心电图那条路要用户手动按表冠 30 秒。")
+                        Text("逐拍数据由手表产生、我们只搬运原始时间戳；RR 间期在手机上计算。"
+                             + "被动逐拍数据预期需要开启「房颤历史」。")
                             .font(.system(size: 9))
                             .foregroundStyle(.tertiary)
                     }

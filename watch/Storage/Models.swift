@@ -145,8 +145,23 @@ final class HeartbeatSeriesRecord {
     var startDate: Date
     var endDate: Date
 
-    /// 逐拍间隔（毫秒），已打包
+    /// 逐拍时间戳（相对序列起点的**毫秒偏移**），已按 `BeatPacking` 打包。
+    ///
+    /// **这是当前格式**，也是手表唯一需要理解的东西 —— 它不理解 RR、不理解 HRV，
+    /// 只是把 HealthKit 给的时间戳搬下来。
+    ///
+    /// ⚠️ Optional 是**为了不改 schema**：给已有的 `@Model` 加一个可选属性是
+    /// SwiftData 的轻量迁移，安全；而把 `rrPacked` 改名/改类型可能让
+    /// `ModelContainer` 打不开 —— 那是**每次启动都崩**，代价太大。
+    var offsetsPacked: Data?
+
+    /// **旧格式**：逐拍间隔（毫秒），已打包。
+    ///
+    /// 新记录一律写空 `Data()`。留着这个属性是为了 schema 稳定，
+    /// 以及让安装过 v2.1 的手表上那批老记录还能被上传。
+    /// 等它们过 7 天保留期自然消失后，这个属性就可以删了。
     var rrPacked: Data
+
     /// HealthKit 给出的原始拍数（用于校验，见 `HeartbeatSeriesPayload.isSelfConsistent`）
     var beatCount: Int
 
@@ -161,7 +176,8 @@ final class HeartbeatSeriesRecord {
     init(uuid: UUID,
          startDate: Date,
          endDate: Date,
-         rrPacked: Data,
+         offsetsPacked: Data? = nil,
+         rrPacked: Data = Data(),
          beatCount: Int,
          ingestedAt: Date = .now,
          sourceBundleID: String? = nil,
@@ -171,6 +187,7 @@ final class HeartbeatSeriesRecord {
         self.uuid = uuid
         self.startDate = startDate
         self.endDate = endDate
+        self.offsetsPacked = offsetsPacked
         self.rrPacked = rrPacked
         self.beatCount = beatCount
         self.ingestedAt = ingestedAt
@@ -185,7 +202,10 @@ final class HeartbeatSeriesRecord {
         HeartbeatSeriesPayload(uuid: uuid,
                                startDate: startDate,
                                endDate: endDate,
-                               rrPacked: rrPacked,
+                               beatOffsetsPacked: offsetsPacked,
+                               // 老记录（v2.1 以及更早）没有 offsets，只有间期。
+                               // 原样带上去，让手机去累加成时间戳。
+                               rrPacked: offsetsPacked == nil ? rrPacked : nil,
                                beatCount: beatCount,
                                ingestedAt: ingestedAt,
                                sourceBundleID: sourceBundleID,

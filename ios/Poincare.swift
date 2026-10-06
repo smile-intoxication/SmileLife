@@ -14,11 +14,23 @@ enum RRPoincare {
     static let unitSuffix = "ms"
 }
 
-/// 一条序列的 RR 间期（毫秒）。
+/// 一条序列的**逐拍时间戳**（相对序列起点的毫秒偏移）。
+///
+/// ## 为什么存时间戳而不是 RR 间期
+/// RR 只是时间戳的一阶差分 —— 存时间戳能算出 RR，反过来不行。
+/// 以后要加的分析（频谱 PSD 需要按真实时间重采样、样本熵需要原始序列）
+/// 都要求拿到时间戳，所以**原始形式**才是该存的那个。
+///
+/// 这不是"多存一点"，而是**分层**：手表只负责搬运原始数据，
+/// **所有解释性计算（RR、Poincaré、SDNN、以后可能加的 PSD）都在手机上**。
+/// 手表代码的迭代成本极高，手机随时能更新。
 struct RRSeriesData: Sendable {
     let seriesUUID: UUID
     let startDate: Date
-    let rrMillis: [Int]
+    let beatOffsetsMillis: [Int]
+
+    /// RR 间期（毫秒）—— 相邻时间戳之差，**在手机上算**
+    var rrMillis: [Int] { HeartbeatSeriesPayload.intervals(fromOffsets: beatOffsetsMillis) }
 }
 
 /// 一次 RR 序列查询的结果。

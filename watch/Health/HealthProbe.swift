@@ -59,10 +59,12 @@ struct HeartbeatSeriesProbe: Sendable {
     /// 还是"稀稀拉拉一直有"。**这个分布才是判定的直接证据** ——
     /// 数据只从某天开始有 = 那天开了某个开关。
     let dailyCounts: [DailySeriesCount]
-    /// 最新一条序列里的拍数
-    let beatsInLatestSeries: Int?
-    /// 相邻拍时间戳差值的中位数，换算成毫秒 —— 这就是 RR 间期
-    let medianRRms: Double?
+    /// ⚠️ 这里**刻意没有** RR 间期、拍数、HRV 之类的字段。
+    ///
+    /// 手表的职责是"搬运"，不是"解释"：RR 间期、Poincaré、SDNN（以后还有 PSD）
+    /// **全部在手机上算**。手表代码的迭代成本极高（要走 watchOS 发布 + 用户装表），
+    /// 手机随时能更新 —— 所以任何解释性计算都不该出现在手表上。
+    /// 探针只回答"HealthKit 里有没有、有多少、什么时候的"。
 }
 
 /// HealthKit 侧的全部探针结果
@@ -171,30 +173,14 @@ actor HealthProbe {
         let earliest = samples.map(\.startDate).min()
         let daily = Self.dailyCounts(dates: samples.map(\.startDate), days: days)
 
-        guard let latest = samples.first as? HKHeartbeatSeriesSample else {
-            return HeartbeatSeriesProbe(days: days,
-                                        seriesCount: samples.count,
-                                        latestSampleDate: samples.first?.startDate,
-                                        earliestSampleDate: earliest,
-                                        dailyCounts: daily,
-                                        beatsInLatestSeries: nil,
-                                        medianRRms: nil)
-        }
-
-        let beats = await beatTimestamps(of: latest)
-        var rr: [Double] = []
-        if beats.count >= 2 {
-            for i in 1..<beats.count {
-                rr.append((beats[i] - beats[i - 1]) * 1000)   // 秒 → 毫秒
-            }
-        }
+        // ⚠️ 这里**不再**展开逐拍时间戳。
+        //    展开的意义是算 RR 间期，而那件事现在由手机负责；
+        //    在手表上多跑一次逐拍查询只是白白消耗后台预算（后台只有几秒）。
         return HeartbeatSeriesProbe(days: days,
                                     seriesCount: samples.count,
-                                    latestSampleDate: latest.startDate,
+                                    latestSampleDate: samples.first?.startDate,
                                     earliestSampleDate: earliest,
-                                    dailyCounts: daily,
-                                    beatsInLatestSeries: beats.count,
-                                    medianRRms: Self.median(rr))
+                                    dailyCounts: daily)
     }
 
     /// 按**本地自然日**分桶，没有数据的日子**补 0**。
@@ -235,29 +221,6 @@ actor HealthProbe {
                 // 没授权时这里返回的是空数组而不是错误 —— 所以「0 条」同时意味着
                 // 「没数据」或「没授权」，界面上必须如实说明这一点。
                 cont.resume(returning: samples ?? [])
-            }
-            store.execute(query)
-        }
-    }
-
-    /// 读出一条心跳序列里的**逐拍时间戳**（相对序列起点的秒数）。
-    ///
-    /// ⚠️ dataHandler 是**逐拍回调**的，`done` 为 true 时才是最后一次。
-    /// continuation 必须**恰好 resume 一次**，所以用 `finished` 守住，
-    /// 并且 `error != nil` 时也要 resume（否则会永久挂住）。
-    private func beatTimestamps(of sample: HKHeartbeatSeriesSample) async -> [TimeInterval] {
-        await withCheckedContinuation { cont in
-            var stamps: [TimeInterval] = []
-            var finished = false
-
-            let query = HKHeartbeatSeriesQuery(heartbeatSeries: sample) { _, timeSinceStart, _, done, error in
-                if error == nil {
-                    stamps.append(timeSinceStart)
-                }
-                if (done || error != nil) && !finished {
-                    finished = true
-                    cont.resume(returning: stamps)
-                }
             }
             store.execute(query)
         }

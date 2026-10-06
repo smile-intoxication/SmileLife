@@ -400,20 +400,23 @@ actor HealthSyncEngine {
     }
 
     /// 把一条心跳序列展开成可落库的记录。
+    ///
+    /// ## ⚠️ 手表在这里**不做任何解释性计算**
+    /// 只把 HealthKit 给的逐拍时间戳（相对序列起点的秒数）转成毫秒偏移就落库。
+    /// RR 间期、Poincaré、SDNN、以后可能加的 PSD —— **全部在手机上算**。
+    ///
+    /// 为什么这条边界值得守：手表代码的迭代成本极高（改一次要走 watchOS 发布
+    /// + 用户装到表上），而手机随时能更新。手表越"哑"，以后加新分析的代价越小。
+    /// 自检脚本第 16 节会断言手表侧不出现 `RRPacking.pack`。
+    ///
+    /// 📌 注意这里**不过滤**非正的时间戳（收尾那次回调可能带 0 或重复值）。
+    /// 过滤搬到手机的 `HeartbeatSeriesPayload.intervals(fromOffsets:)` 里做 ——
+    /// 语义没变，只是"谁来判断"变了。
     private func expandHeartbeatSeries(_ sample: HKHeartbeatSeriesSample) async throws -> HeartbeatSeriesRecord {
         let stamps = try await fetchHeartbeats(of: sample)
 
-        // 相邻时间戳之差 = RR 间期（秒 → 毫秒）
-        var intervals: [Int] = []
-        if stamps.count >= 2 {
-            intervals.reserveCapacity(stamps.count - 1)
-            for index in 1..<stamps.count {
-                let delta = Int(((stamps[index] - stamps[index - 1]) * 1000).rounded())
-                // ⚠️ 只保留**正的**间隔：收尾那次回调不保证带有效时间戳
-                //    （可能是 0），那会算出 0 或负数。丢掉它们，别让脏数据进库。
-                if delta > 0 { intervals.append(delta) }
-            }
-        }
+        // 秒 → 毫秒。负数（理论上不会有）由 `BeatPacking.pack` 钳成 0。
+        let offsets = stamps.map { Int(($0 * 1000).rounded()) }
 
         let source = sample.sourceRevision.source
         let device = sample.device
@@ -421,7 +424,7 @@ actor HealthSyncEngine {
         return HeartbeatSeriesRecord(uuid: sample.uuid,
                                      startDate: sample.startDate,
                                      endDate: sample.endDate,
-                                     rrPacked: RRPacking.pack(intervals),
+                                     offsetsPacked: BeatPacking.pack(offsets),
                                      beatCount: stamps.count,
                                      ingestedAt: .now,
                                      sourceBundleID: source.bundleIdentifier,

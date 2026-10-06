@@ -174,10 +174,21 @@ final class PhoneHeartbeatSeries {
     var startDate: Date
     var endDate: Date
 
-    /// 逐拍间隔（毫秒），已按 `RRPacking` 打包（2 字节/间期）
+    /// 逐拍时间戳（相对序列起点的**毫秒偏移**），已按 `BeatPacking` 打包。
+    ///
+    /// ⚠️ Optional 是为了**不改 schema**：给已有的 `@Model` 加一个可选属性
+    /// 是 SwiftData 的轻量迁移，安全；改名/改类型则可能让 `ModelContainer`
+    /// 打不开 —— 那是**每次启动都崩**，而手机上的数据是长期档案，不能拿来冒险。
+    var offsetsPacked: Data?
+
+    /// **旧格式**：手表算好的逐拍间隔（毫秒），已打包。
+    ///
+    /// 新记录写空 `Data()`。留着是为了让 v2.1 时期已经同步过来的那批序列
+    /// 还能被读取和分析（过期后自然消失）。
     var rrPacked: Data
+
     /// HealthKit 给出的原始拍数。用于自洽校验：
-    /// 正常情况解出来应该是 `beatCount` 或 `beatCount - 1` 条间期。
+    /// 新格式下解出来的时间戳个数应该**正好等于**拍数。
     var beatCount: Int
 
     var sourceName: String?
@@ -191,7 +202,8 @@ final class PhoneHeartbeatSeries {
         self.uuid = payload.uuid
         self.startDate = payload.startDate
         self.endDate = payload.endDate
-        self.rrPacked = payload.rrPacked
+        self.offsetsPacked = payload.beatOffsetsPacked
+        self.rrPacked = payload.beatOffsetsPacked == nil ? (payload.rrPacked ?? Data()) : Data()
         self.beatCount = payload.beatCount
         self.sourceName = payload.sourceName
         self.deviceName = payload.deviceName
@@ -205,20 +217,40 @@ final class PhoneHeartbeatSeries {
     /// 所以这里只需要刷新"收到时间"，不需要覆盖数据。
     func apply(_ payload: HeartbeatSeriesPayload, receivedAt: Date) {
         self.receivedAt = receivedAt
-        // 万一手表那边修正过（例如修了展开逻辑后重新展开），以新数据为准。
+        // 万一手表那边修正过（例如改成上传原始时间戳后重新展开），以新数据为准。
         // 逐拍数据没变时这次赋值是幂等的。
-        if payload.rrPacked != self.rrPacked || payload.beatCount != self.beatCount {
-            self.rrPacked = payload.rrPacked
+        let newOffsets = payload.beatOffsetsPacked
+        let newRR = newOffsets == nil ? (payload.rrPacked ?? Data()) : Data()
+        if newOffsets != self.offsetsPacked || newRR != self.rrPacked || payload.beatCount != self.beatCount {
+            self.offsetsPacked = newOffsets
+            self.rrPacked = newRR
             self.beatCount = payload.beatCount
         }
     }
 
-    /// 解包出来的逐拍间隔
-    var rrMillis: [Int] { RRPacking.unpack(rrPacked) }
+    /// 逐拍时间戳（毫秒偏移）。老格式的记录会被累加成偏移，让上游只需一套代码。
+    var beatOffsetsMillis: [Int] {
+        if let packed = offsetsPacked, !packed.isEmpty {
+            return BeatPacking.unpack(packed)
+        }
+        var offsets: [Int] = [0]
+        var running = 0
+        for interval in RRPacking.unpack(rrPacked) {
+            running += interval
+            offsets.append(running)
+        }
+        return offsets
+    }
 
-    /// 拍数与间期数是否自洽 —— 不自洽的序列**不该被画进图里**
+    /// RR 间期（毫秒）—— **在手机上由时间戳相邻相减算出来**
+    var rrMillis: [Int] { HeartbeatSeriesPayload.intervals(fromOffsets: beatOffsetsMillis) }
+
+    /// 时间戳个数与拍数是否自洽 —— 不自洽的序列**不该被画进图里**
     /// （会画出一堆凭空捏造的间期）。
     var isSelfConsistent: Bool {
+        if let packed = offsetsPacked, !packed.isEmpty {
+            return beatCount >= 2 && packed.count / 4 == beatCount
+        }
         let count = rrPacked.count / 2
         return count >= 1 && (count == beatCount || count == beatCount - 1)
     }
