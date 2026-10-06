@@ -177,6 +177,22 @@ struct DiagnosticsView: View {
                                 .font(.system(size: 9))
                                 .foregroundStyle(.secondary)
                         }
+                        // ——— 这两行是为了回答一个具体的因果问题 ———
+                        // 「现在能看到数据，是因为补了读权限，还是因为开了房颤历史？」
+                        // 判据：读权限只影响"我们能不能看见"，不影响手表写不写。
+                        // 所以只要最早一条**早于**打开房颤历史的时间，就说明手表一直在写。
+                        // 而每日条数分布能看出"是不是某天突然开始有的"。
+                        if let at = hb.earliestSampleDate {
+                            Text("最早一条 \(Self.relative(at))")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                        }
+                        if !hb.dailyCounts.isEmpty {
+                            Text("每日条数(旧→新) "
+                                 + hb.dailyCounts.map { "\($0.count)" }.joined(separator: " "))
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                        }
                         if let beats = hb.beatsInLatestSeries {
                             Text("最新一条含 \(beats) 拍")
                                 .font(.system(size: 9))

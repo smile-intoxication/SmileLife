@@ -28,6 +28,12 @@ struct RmssdProbe: Sendable {
     let latest: Date?
 }
 
+/// 某一天的序列条数。
+struct DailySeriesCount: Sendable {
+    let day: Date
+    let count: Int
+}
+
 /// 心跳序列（RR 间期）探针。
 ///
 /// ⚠️ 预期结果是 **seriesCount == 0**：`HKHeartbeatSeriesSample` 的用途是让
@@ -38,6 +44,21 @@ struct HeartbeatSeriesProbe: Sendable {
     let days: Int
     let seriesCount: Int
     let latestSampleDate: Date?
+    /// **最早**一条序列的时间。
+    ///
+    /// 这个字段是为了回答一个具体的因果问题：「现在能看到数据了，
+    /// 是因为补了读权限，还是因为打开了房颤历史？」
+    ///
+    /// 判据：**读权限只影响"我们能不能看见"，不影响手表写不写。**
+    /// 所以只要最早那条**早于**用户打开房颤历史的时间，就说明手表一直在写，
+    /// 之前看不到纯粹是没权限。
+    let earliestSampleDate: Date?
+    /// 近 N 天**每天**的序列条数（旧 → 新，没有数据的日子补 0）。
+    ///
+    /// 为什么不只给"最早/最新"：只给两端的话，看不出中间是"一直是 0 然后某天突然开始"，
+    /// 还是"稀稀拉拉一直有"。**这个分布才是判定的直接证据** ——
+    /// 数据只从某天开始有 = 那天开了某个开关。
+    let dailyCounts: [DailySeriesCount]
     /// 最新一条序列里的拍数
     let beatsInLatestSeries: Int?
     /// 相邻拍时间戳差值的中位数，换算成毫秒 —— 这就是 RR 间期
@@ -146,10 +167,16 @@ actor HealthProbe {
         let predicate = HKQuery.predicateForSamples(withStart: from, end: nil, options: .strictStartDate)
         let samples = await fetch(type: type, predicate: predicate, limit: HKObjectQueryNoLimit, ascending: false)
 
+        // 「现在能看到数据，是补了读权限还是开了房颤历史」靠这两个数回答，见结构体注释
+        let earliest = samples.map(\.startDate).min()
+        let daily = Self.dailyCounts(dates: samples.map(\.startDate), days: days)
+
         guard let latest = samples.first as? HKHeartbeatSeriesSample else {
             return HeartbeatSeriesProbe(days: days,
                                         seriesCount: samples.count,
                                         latestSampleDate: samples.first?.startDate,
+                                        earliestSampleDate: earliest,
+                                        dailyCounts: daily,
                                         beatsInLatestSeries: nil,
                                         medianRRms: nil)
         }
@@ -164,8 +191,32 @@ actor HealthProbe {
         return HeartbeatSeriesProbe(days: days,
                                     seriesCount: samples.count,
                                     latestSampleDate: latest.startDate,
+                                    earliestSampleDate: earliest,
+                                    dailyCounts: daily,
                                     beatsInLatestSeries: beats.count,
                                     medianRRms: Self.median(rr))
+    }
+
+    /// 按**本地自然日**分桶，没有数据的日子**补 0**。
+    ///
+    /// ⚠️ 补 0 是关键：只列"有数据的那几天"会跳过"哪几天是空的"，
+    /// 而那恰恰是判断"某天打开了某个开关"的依据。
+    /// 用 `Calendar.startOfDay` 而不是 epoch 取模 —— 后者算出来的是 UTC 午夜，
+    /// 在东八区就成了早上 8 点（同一个坑在图表侧也踩过）。
+    private static func dailyCounts(dates: [Date], days: Int) -> [DailySeriesCount] {
+        let calendar = Calendar.current
+        var buckets: [Date: Int] = [:]
+        for date in dates {
+            buckets[calendar.startOfDay(for: date), default: 0] += 1
+        }
+
+        let today = calendar.startOfDay(for: .now)
+        var result: [DailySeriesCount] = []
+        for offset in stride(from: days - 1, through: 0, by: -1) {
+            guard let day = calendar.date(byAdding: .day, value: -offset, to: today) else { continue }
+            result.append(DailySeriesCount(day: day, count: buckets[day] ?? 0))
+        }
+        return result
     }
 
     // MARK: 底层查询
