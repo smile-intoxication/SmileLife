@@ -413,10 +413,12 @@ actor HealthSyncEngine {
     /// 过滤搬到手机的 `HeartbeatSeriesPayload.intervals(fromOffsets:)` 里做 ——
     /// 语义没变，只是"谁来判断"变了。
     private func expandHeartbeatSeries(_ sample: HKHeartbeatSeriesSample) async throws -> HeartbeatSeriesRecord {
-        let stamps = try await fetchHeartbeats(of: sample)
+        // 逐拍时间戳与洞标记**一起**取回（同一个回调里成对收下的，长度必然相等）。
+        // 查询本身收敛在 `HeartbeatReader` 这一个文件里，见那里的说明。
+        let stream = try await HeartbeatReader.beats(of: sample, store: healthStore)
 
         // 秒 → 毫秒。负数（理论上不会有）由 `BeatPacking.pack` 钳成 0。
-        let offsets = stamps.map { Int(($0 * 1000).rounded()) }
+        let offsets = stream.stamps.map { Int(($0 * 1000).rounded()) }
 
         let source = sample.sourceRevision.source
         let device = sample.device
@@ -425,47 +427,17 @@ actor HealthSyncEngine {
                                      startDate: sample.startDate,
                                      endDate: sample.endDate,
                                      offsetsPacked: BeatPacking.pack(offsets),
-                                     beatCount: stamps.count,
+                                     // 洞标记必须**和时间戳一起**落库：
+                                     // 少了它，手机端会把跨洞的差值当成真实 RR 间期
+                                     // （漏 1 拍 → 800 ms 变 1600 ms，而 1600 ms 在生理范围内，
+                                     //  会伪装成真实间隔进散点图并拉大 SDNN）。
+                                     gapsPacked: GapPacking.pack(stream.gaps),
+                                     beatCount: stream.stamps.count,
                                      ingestedAt: .now,
                                      sourceBundleID: source.bundleIdentifier,
                                      sourceName: source.name,
                                      deviceName: device?.name,
                                      deviceModel: device?.model)
-    }
-
-    /// 读出一条心跳序列里的**逐拍时间戳**（相对序列起点的秒数）。
-    ///
-    /// ⚠️ `dataHandler` 是**逐拍回调**的，`done` 为 true 时才是最后一次。
-    /// continuation 必须**恰好 resume 一次**，所以用 `finished` 守住；
-    /// 并且 `error != nil` 时也要 resume —— 否则会永久挂住，把后台预算烧光
-    /// （然后被系统按退避算法收紧额度）。
-    private func fetchHeartbeats(of sample: HKHeartbeatSeriesSample) async throws -> [TimeInterval] {
-        try await withCheckedThrowingContinuation { continuation in
-            var stamps: [TimeInterval] = []
-            var finished = false
-
-            let query = HKHeartbeatSeriesQuery(heartbeatSeries: sample) { _, timeSinceStart, _, done, error in
-                if let error {
-                    if !finished {
-                        finished = true
-                        continuation.resume(throwing: error)
-                    }
-                    return
-                }
-
-                // ⚠️ 无论 done 与否都收下这个时间戳：Apple **没有文档说明**
-                //    "收尾那一次回调带不带有效时间戳"。
-                //    多收一个无意义的值，会在算 RR 时被 `delta > 0` 过滤掉；
-                //    少收一个则是**真的丢一拍**（少一个间期）。两害相权取其轻。
-                stamps.append(timeSinceStart)
-
-                if done && !finished {
-                    finished = true
-                    continuation.resume(returning: stamps)
-                }
-            }
-            healthStore.execute(query)
-        }
     }
 
     // MARK: - Anchored query 的 async 包装

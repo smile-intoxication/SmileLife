@@ -299,8 +299,8 @@ fi
 
 # 反向：手机上必须真的在算 RR。
 # 只查"手表没算"是不够的 —— 两边都不算的话图就是空的，而那是个**静默**的空。
-if grep -q 'intervals(fromOffsets' ios/Poincare.swift 2>/dev/null; then
-  ok "手机侧由时间戳推导 RR 间期（intervals(fromOffsets:)）"
+if grep -q 'breakdown(fromOffsets' ios/Poincare.swift 2>/dev/null; then
+  ok "手机侧由时间戳推导 RR 间期（按洞切段 + 相邻相减）"
 else
   bad "手机侧没有推导 RR 间期 —— 手表不算是故意的，但手机必须算"
 fi
@@ -312,6 +312,71 @@ if grep -q 'var beatOffsetsPacked: Data?' shared/RRSeries.swift 2>/dev/null; the
   ok "beatOffsetsPacked 是 Optional（兼容只发 rrPacked 的老手表）"
 else
   bad "beatOffsetsPacked 必须是 Optional —— 老版本手表没有这个字段"
+fi
+
+# ---------- 16b. 「洞」标记（`precededByGap`）不许再被丢掉 ----------
+#
+# 这是一条**修过一次、绝不能再退回去**的边界：
+# Apple 明确说 `precededByGap` 的意思是「这一拍前面有洞、可能漏了一拍或多拍」，
+# 也就是"它和前一拍的时间差**不是**一个真实的心跳间隔"。
+# 而我们的 RR 间期正是相邻相减算出来的 —— 丢掉这个标记的后果不是"少一个字段"，
+# 而是**漏 1 拍把 800 ms 变成 1600 ms**，而 1600 ms 落在手机端
+# 300–2000 ms 的生理范围内，于是它会伪装成一个真实间隔进散点图、并把 SDNN 拉大。
+# 这个错误**不报错、不崩、图也画得出来**，属于最危险的那一类。
+#
+# 判据（四条都要）：
+#   ① 查询只在一处 —— `HKHeartbeatSeriesQuery` 只允许出现在 HeartbeatReader.swift
+#      （两处各写一份必然漂移；这也是"一个事实只允许一处定义"的既有原则）
+#   ② 手表侧确实把标记带上了（同步引擎里出现 `precededByGap`）
+#   ③ 载荷字段是 Optional（老版本兼容）
+#   ④ 过滤逻辑真的在看那个标记（不是收下来又不用）
+HB_QUERY_FILES=""
+for f in $(find . -name '*.swift' -not -path './build/*' 2>/dev/null); do
+  if code_only "$f" | grep -q 'HKHeartbeatSeriesQuery('; then
+    HB_QUERY_FILES="$HB_QUERY_FILES $f"
+  fi
+done
+if [ "$(echo $HB_QUERY_FILES | wc -w)" -eq 1 ] \
+   && echo "$HB_QUERY_FILES" | grep -q 'watch/Health/HeartbeatReader.swift'; then
+  ok "HKHeartbeatSeriesQuery 只有一处调用点（HeartbeatReader.swift）"
+else
+  bad "HKHeartbeatSeriesQuery 的调用点不是唯一一处：$HB_QUERY_FILES —— 洞标记会在别处被漏掉"
+fi
+
+if code_only watch/Health/HeartbeatReader.swift 2>/dev/null | grep -q 'precededByGap'; then
+  ok "手表侧确实收下了 precededByGap（不再写成 _）"
+else
+  bad "HeartbeatReader 没有收 precededByGap —— 跨洞的差值会被当成真实 RR 间期"
+fi
+
+if grep -q 'var gapFlagsPacked: Data?' shared/RRSeries.swift 2>/dev/null; then
+  ok "gapFlagsPacked 是 Optional（老手表没有这个字段）"
+else
+  bad "gapFlagsPacked 必须是 Optional —— 否则老手表发来的整批数据会解码失败"
+fi
+
+# ④ 收下来却不用 = 白做。判据用**代码**（`code_only` 剥注释），
+#    免得被解释这条规则的注释自己触发（坑 #40 的误报）。
+if code_only shared/RRSeries.swift | grep -q 'crossedGap'; then
+  ok "跨洞的间隔确实被排除（breakdown 里检查了洞标记）"
+else
+  bad "breakdown 没有使用洞标记 —— 收下 precededByGap 却不用，跨洞间隔照样进图"
+fi
+
+# 两端的持久化字段也必须是 Optional：
+# 给已有的 @Model 加**可选**属性是 SwiftData 的轻量迁移；
+# 加非可选属性可能让 ModelContainer 打不开 —— 那是**每次启动都崩**，
+# 而手机上的心跳序列是长期档案，不能拿来冒险。
+if grep -q 'var gapsPacked: Data?' watch/Storage/Models.swift 2>/dev/null; then
+  ok "HeartbeatSeriesRecord.gapsPacked 是 Optional（轻量迁移，不用改 schema）"
+else
+  bad "HeartbeatSeriesRecord.gapsPacked 必须是 Optional"
+fi
+
+if grep -q 'var gapsPacked: Data?' ios/PhoneModels.swift 2>/dev/null; then
+  ok "PhoneHeartbeatSeries.gapsPacked 是 Optional（轻量迁移）"
+else
+  bad "PhoneHeartbeatSeries.gapsPacked 必须是 Optional"
 fi
 
 rm -rf "$TMPD"
@@ -633,9 +698,17 @@ fi
 # 实测踩到过：手表端写了一行 `session?.isPaired`，CI 报
 #   `error: 'isPaired' is unavailable in watchOS`（Issue #5）。
 section "14. WCSession 属性的平台不对称"
-IOS_ONLY_HIT=$(for f in $(grep -rl -E 'isPaired|isWatchAppInstalled' watch --include='*.swift' 2>/dev/null); do
+# ⚠️ 判据必须写成「**成员访问**」形式（名字前面带一个点），不能只查裸名字。
+#    实测踩到一次**纯误报**：给 `HeartbeatReader.Beats` 加了一个
+#    `var isPaired: Bool`（本意是"两个数组长度对齐"），这一节就报警说
+#    "手表端用了 iOS 专属属性" —— 纯粹是名字撞车。
+#    而真正的违规形态一定是**访问属性**：`session?.isPaired` / `session.isPaired`
+#    （Issue #5 那次就是 `session?.isPaired`）。
+#    收紧判据不是纵容，而是让守卫只在真出问题时报警 ——
+#    守卫一旦误报，久而久之就没人信它了（脚本开头那句注释说的正是这件事）。
+IOS_ONLY_HIT=$(for f in $(grep -rl -E '\.(isPaired|isWatchAppInstalled)' watch --include='*.swift' 2>/dev/null); do
                  code_only "$f"
-               done | grep -c -E 'isPaired|isWatchAppInstalled')
+               done | grep -c -E '\.(isPaired|isWatchAppInstalled)')
 if [ "$IOS_ONLY_HIT" -gt 0 ]; then
   bad "watch/ 里用了 WCSession 的 iOS 专属属性（isPaired / isWatchAppInstalled）—— watchOS 上是 __WATCHOS_UNAVAILABLE，编译不过"
 else

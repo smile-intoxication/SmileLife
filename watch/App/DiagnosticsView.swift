@@ -188,16 +188,63 @@ struct DiagnosticsView: View {
                                 .foregroundStyle(.secondary)
                         }
                         if !hb.dailyCounts.isEmpty {
-                            Text("每日条数(旧→新) "
-                                 + hb.dailyCounts.map { "\($0.count)" }.joined(separator: " "))
+                            Text("每日条数(旧→新) " + Self.countList(hb.dailyCounts.map(\.count)))
                                 .font(.system(size: 9))
                                 .foregroundStyle(.secondary)
                         }
-                        // ⚠️ 这里**刻意不显示 RR 间期 / 拍数 / HRV**。
+
+                        // ——— 以下回答「多久一条 / 一条多长 / 一条几拍」———
+                        // ⚠️ 这三行是**替代"盯着屏幕等"**的：序列的产生是条件驱动的，
+                        //    白天十几分钟没有新序列完全正常，靠现场观察推不出平均节奏。
+                        //    要看的是分布，不是某一次。
+                        Text(Self.intervalLine(hb))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                        Text(Self.durationLine(hb))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                        Text(Self.beatCountLine(hb))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                        if !hb.hourlyCounts.isEmpty {
+                            // 回答"是不是只在夜里" —— 和"每日条数"是不同粒度：
+                            // 那个看哪一天开始有，这个看一天里的哪个时段有。
+                            Text(Self.hourlyLine(hb))
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        // ——— 最新一条的逐拍检查 ——
+                        // ⚠️ 这些**不是**派生指标，而是样本自身的属性
+                        //    （几拍、有没有洞、顺序对不对）。RR 间期 / HRV 仍然只在手机上算。
+                        if let d = hb.latestBeatDetail {
+                            Text(Self.beatDetailLine(d))
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                            Text(Self.beatDetailSecondLine(d))
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                        } else {
+                            Text("最新一条逐拍：没查到（逐拍查询失败或序列为空）")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                        }
+
+                        // ——— 是不是系统产的 ———
+                        // 官方文档（HKMetadataKeyAlgorithmVersion 的 Note）写着：
+                        // watchOS 8 起系统会给 Apple Watch 生成的
+                        // heartRateVariabilitySDNN 与 HKHeartbeatSeriesSample 样本带这个键。
+                        // 第三方 app 用 HKHeartbeatSeriesBuilder 写的不带 —— 所以这是个判据。
+                        Text(Self.algorithmLine(hb))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+
+                        // ⚠️ 这里**刻意不显示 RR 间期 / SDNN / HRV**。
                         //    手表只负责把逐拍时间戳搬给手机，那之后的一切计算
                         //    （RR、Poincaré、SDNN，以后还有 PSD）都在手机上做 ——
                         //    所以手表界面上没有它们的容身之处。
-                        //    这一节只回答"HealthKit 里有没有、有多少、什么时候的"。
+                        //    上面那些字段能显示，是因为它们回答的是
+                        //    「**有多少、什么时候的、完不完整**」，而不是"这些心跳意味着什么"。
                         // ⚠️ 这条提醒不是凑字数的：v1.7 就是因为**没申请读这个类型的权限**，
                         //    导致这里显示 0 条，而 0 条被误读成"设备不产生这个数据"。
                         //    HealthKit 对没授权的类型返回空数组**而不是错误**，
@@ -206,8 +253,8 @@ struct DiagnosticsView: View {
                              + "HealthKit 不报错，只返回空数组 —— 所以别只看这一行下结论。")
                             .font(.system(size: 9))
                             .foregroundStyle(.tertiary)
-                        Text("逐拍数据由手表产生、我们只搬运原始时间戳；RR 间期在手机上计算。"
-                             + "被动逐拍数据预期需要开启「房颤历史」。")
+                        Text("逐拍数据由手表产生、我们只搬运原始时间戳（含「洞」标记）；"
+                             + "RR 间期在手机上计算。被动逐拍数据预期需要开启「房颤历史」。")
                             .font(.system(size: 9))
                             .foregroundStyle(.tertiary)
                     }
@@ -349,6 +396,91 @@ struct DiagnosticsView: View {
             index += 1
         }
         return index == 0 ? "\(Int(size)) B" : String(format: "%.1f %@", size, units[index])
+    }
+
+    /// 「中位 / 最小 / 最大」（三者同单位）。
+    ///
+    /// ⚠️ 三个数**必须一起给**：只给中位数看不出分布有多散 ——
+    /// 而"间隔中位 4 分钟、最大 3 小时"和"间隔中位 4 分钟、最大 6 分钟"
+    /// 是两种完全不同的数据形态（前者夜里才有，后者全天稳定）。
+    private static func spread(_ median: Double?,
+                               _ min: Double?,
+                               _ max: Double?,
+                               unit: String) -> String {
+        guard let median else { return "—" }
+        let lo = min.map { String(format: "%.0f", $0) } ?? "—"
+        let hi = max.map { String(format: "%.0f", $0) } ?? "—"
+        return String(format: "%.0f", median) + " / " + lo + " / " + hi + " " + unit
+    }
+
+    /// 一串计数（每日条数 / 按小时条数）。
+    ///
+    /// ⚠️ **保留 0**：没有数据的那一格必须显示成 0，不能跳过 ——
+    /// "哪几个格子是空的"本身就是结论（哪几天没数据 / 哪个时段没数据）。
+    private static func countList(_ counts: [Int]) -> String {
+        counts.map { "\($0)" }.joined(separator: " ")
+    }
+
+    /// 三态布尔：`nil` 是"不知道"，**不能显示成"否"**。
+    ///
+    /// Apple 没有文档说明首拍的 `precededByGap` 应该是什么值，
+    /// 所以"没取到"和"取到了 false"必须能区分开。
+    private static func flagText(_ value: Bool?) -> String {
+        guard let value else { return "—" }
+        return value ? "是" : "否"
+    }
+
+    // MARK: - 心跳序列那几行的文本
+    //
+    // ⚠️ 为什么这些要单独成函数、而不是写在 `Text("…\(…)…")` 的插值里：
+    //    本项目坑 #27 —— 把闭包 / 条件表达式 / 字符串插值叠在一起塞进视图，
+    //    SwiftUI 会让编译器"类型推导超时"（`unable to type-check this expression
+    //    in reasonable time`），**而那种错在 Windows 上完全看不出来**，只能等 CI。
+    //    先把字符串拼好、视图里只留一次函数调用，是最省事的规避方式。
+
+    private static func intervalLine(_ hb: HeartbeatSeriesProbe) -> String {
+        // 间隔换算成**分钟**显示：它的量级是几分钟，用秒显示会是一串几十万的大数。
+        "间隔 中位/最小/最大 "
+            + spread(hb.medianInterval.map { $0 / 60 },
+                     hb.minInterval.map { $0 / 60 },
+                     hb.maxInterval.map { $0 / 60 },
+                     unit: "分")
+    }
+
+    private static func durationLine(_ hb: HeartbeatSeriesProbe) -> String {
+        "时长 中位/最小/最大 "
+            + spread(hb.medianDuration, hb.minDuration, hb.maxDuration, unit: "秒")
+    }
+
+    private static func beatCountLine(_ hb: HeartbeatSeriesProbe) -> String {
+        "拍数 中位/最小/最大 "
+            + spread(hb.medianBeatCount,
+                     hb.minBeatCount.map { Double($0) },
+                     hb.maxBeatCount.map { Double($0) },
+                     unit: "拍")
+    }
+
+    private static func hourlyLine(_ hb: HeartbeatSeriesProbe) -> String {
+        "按小时(0→23) " + countList(hb.hourlyCounts)
+    }
+
+    private static func beatDetailLine(_ d: BeatDetail) -> String {
+        let counts = "报 \(d.reportedBeats) / 自报 \(d.declaredBeats) 拍"
+        let gaps = "内部洞 \(d.innerGapCount)"
+        let order = "升序 \(d.isAscending ? "✓" : "✗")"
+        return "最新一条逐拍：" + counts + "，" + gaps + "，" + order
+    }
+
+    private static func beatDetailSecondLine(_ d: BeatDetail) -> String {
+        let first = flagText(d.firstBeatPrecededByGap)
+        let span = seconds(d.spanSeconds)
+        return "首拍 precededByGap " + first + "，首末跨度 " + span
+    }
+
+    private static func algorithmLine(_ hb: HeartbeatSeriesProbe) -> String {
+        let version = hb.algorithmVersion ?? "无"
+        let withKey = "\(hb.seriesWithAlgorithmVersion)/\(hb.seriesCount)"
+        return "算法版本 " + version + "，带该键 " + withKey + " 条"
     }
 }
 

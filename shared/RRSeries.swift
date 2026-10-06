@@ -60,6 +60,103 @@ enum BeatPacking {
     }
 }
 
+// MARK: - 洞标记（`precededByGap`）的打包
+
+/// `HKHeartbeatSeriesQuery` 回调里那个 `precededByGap` 的打包 / 解包（**每拍 1 bit**）。
+///
+/// ## 为什么必须把它传下来（这是一个真丢过的信号）
+/// Apple 对它的定义（官方原文，读侧与写侧措辞一致）：
+/// > "A Boolean value that indicates whether this heartbeat was **immediately preceded
+/// > by a gap in the data**, indicating that **one or more heartbeats may be missing**."
+///
+/// 也就是说：**这一拍和前一拍之间的时间差，不是一个真实的心跳间隔** ——
+/// 中间漏了一拍或多拍。而我们的 RR 间期正是"相邻时间戳相减"算出来的，
+/// 所以跨洞算出来的那个值**必须丢掉**。
+///
+/// ## 不丢的后果（为什么这不是"优化"，是修错）
+/// 漏 1 拍的话，800 ms 会变成 1600 ms —— 而 1600 ms **正好落在**
+/// 手机端 300–2000 ms 的生理范围内（`PoincareBuilder.minRR/maxRR`），
+/// 于是它会被当成一个真实的心跳间隔画进散点图，并把 SDNN 拉大。
+/// 临床上这叫"早搏"，实际是"漏拍"，两者被混为一谈。
+///
+/// ⚠️ 没有这个字段时（v3.2 之前的手表发的老数据）我们**只能按"无洞"处理**，
+/// 但那是一个**假设**而不是事实 —— 所以调用方会拿到 `hasGapInfo == false`，
+/// 可以在界面上如实说明。见 `IntervalBreakdown`。
+enum GapPacking {
+
+    /// bit i = 第 i 拍的 `precededByGap`；字节内**低位在前**（bit 0 是该字节最低位）。
+    static func pack(_ flags: [Bool]) -> Data {
+        guard !flags.isEmpty else { return Data() }
+        var data = Data(count: (flags.count + 7) / 8)
+        for (index, flag) in flags.enumerated() where flag {
+            data[index / 8] |= UInt8(1 << (index % 8))
+        }
+        return data
+    }
+
+    /// 解出 `count` 个标记。**长度对不上就返回 `nil`（= "没有洞信息"），绝不猜。**
+    ///
+    /// 为什么宁可返回 nil 也不补零：补零等于宣称"这些拍都没跨洞"，
+    /// 而那正是我们想避免的错误结论。猜错的代价是图上多出假的远端散点，
+    /// 而且它长得和真数据一模一样。
+    static func unpack(_ data: Data, count: Int) -> [Bool]? {
+        guard count > 0, data.count == (count + 7) / 8 else { return nil }
+        let bytes = [UInt8](data)
+        var result: [Bool] = []
+        result.reserveCapacity(count)
+        for index in 0..<count {
+            result.append(bytes[index / 8] & UInt8(1 << (index % 8)) != 0)
+        }
+        return result
+    }
+}
+
+// MARK: - 按洞切段
+
+/// 一条序列里**连续**的一段间期。
+///
+/// 洞把一条序列切成若干段，而**配对必须在段内做** —— 跨段的两个间期
+/// 中间隔着一段没记录的时间，配出来的点是纯噪声。
+struct IntervalRun: Sendable, Equatable {
+
+    /// 这一段里的 RR 间期（毫秒）。**每个值都保证没有跨洞。**
+    let intervals: [Int]
+
+    /// 这一段第一个间期的**起点拍序号**（0 基）。
+    ///
+    /// 只用于给散点图的点生成**稳定且不撞车**的 id
+    /// （`"序列序号-起点拍号-段内序号"`）。不参与任何计算。
+    let startBeatIndex: Int
+}
+
+/// 一条序列的间期拆解结果 —— 把"切段"和"丢了多少"一起带出来。
+///
+/// ⚠️ **丢弃必须回报**（本项目坑 #33）：静默丢掉跨洞间隔，
+/// 用户会以为"数据就这么多"，之后任何"图看着不对"的排查都从错误方向开始。
+struct IntervalBreakdown: Sendable {
+
+    let runs: [IntervalRun]
+
+    /// 因为**跨洞**而丢掉的间隔数（Apple 明确说过这里漏了拍）。
+    let gapCrossedDropped: Int
+
+    /// 因为**非正**而丢掉的（收尾那一次回调不保证带有效时间戳，可能是 0 或重复值）。
+    let nonPositiveDropped: Int
+
+    /// 这条序列到底**有没有**洞信息可用。
+    ///
+    /// `false` 只代表"发数据的手表版本太老/字段缺失"，**不代表没有洞** ——
+    /// 此时我们按"整条一个段"处理，并在界面上说明这是假设。
+    let hasGapInfo: Bool
+
+    /// 全部连续段拍平成一个数组（给 SDNN / 平均心率用）。
+    ///
+    /// ⚠️ 拍平在这里是**安全的**：跨洞的那个间隔已经在切段时丢掉了，
+    /// 剩下的都是真实间隔，求标准差不需要知道段边界。
+    /// 但**配对不对**（`PoincareBuilder`）必须逐段做 —— 两件事的区别就在这。
+    var allIntervals: [Int] { runs.flatMap(\.intervals) }
+}
+
 // MARK: - 旧格式（RR 间期）的打包 —— **只为读历史数据保留**
 
 /// RR 间期（相邻两次心跳的间隔，毫秒）的打包 / 解包。
@@ -121,6 +218,18 @@ struct HeartbeatSeriesPayload: Codable, Equatable, Sendable {
     /// （它只有 `rrPacked`）—— 见 `WatchWire` 里"新字段必须是 Optional"的说明。
     var beatOffsetsPacked: Data?
 
+    /// 每一拍的 `precededByGap` 标记，已按 `GapPacking` 打包（**每拍 1 bit**）。
+    ///
+    /// ## ⚠️ 必须写成 `Optional`
+    /// 本协议与 payload 都遵守「**只增不改**」：老手表发来的载荷里没有这个键，
+    /// 而 Swift 合成的 `Decodable` 对**非可选**属性用 `decode` 而不是 `decodeIfPresent`
+    /// —— 写成 `var x: Data = Data()` 这种"给个默认值"的写法**不能**容忍缺失的键，
+    /// 老版本一解码就抛错、**整批心跳序列全丢**（而不是忽略这个字段）。
+    /// 自检脚本第 13 节守着这一类。
+    ///
+    /// 没有它时的语义是「**没有洞信息**」，不是「没有洞」—— 见 `IntervalBreakdown.hasGapInfo`。
+    var gapFlagsPacked: Data?
+
     /// **旧格式**：手表算好的逐拍间隔。只为兼容还在跑 v2.1 的手表而保留。
     ///
     /// ⚠️ 这个字段是从 `Data`（非可选）改成 `Data?` 的。
@@ -147,6 +256,7 @@ struct HeartbeatSeriesPayload: Codable, Equatable, Sendable {
          startDate: Date,
          endDate: Date,
          beatOffsetsPacked: Data? = nil,
+         gapFlagsPacked: Data? = nil,
          rrPacked: Data? = nil,
          beatCount: Int,
          ingestedAt: Date,
@@ -158,6 +268,7 @@ struct HeartbeatSeriesPayload: Codable, Equatable, Sendable {
         self.startDate = startDate
         self.endDate = endDate
         self.beatOffsetsPacked = beatOffsetsPacked
+        self.gapFlagsPacked = gapFlagsPacked
         self.rrPacked = rrPacked
         self.beatCount = beatCount
         self.ingestedAt = ingestedAt
@@ -184,10 +295,30 @@ struct HeartbeatSeriesPayload: Codable, Equatable, Sendable {
         return offsets
     }
 
-    /// RR 间期（毫秒）—— **由时间戳相邻相减得到，计算发生在手机上**。
-    var rrMillis: [Int] { Self.intervals(fromOffsets: beatOffsetsMillis) }
+    /// 每一拍的 `precededByGap` 标记。`nil` = **这条载荷没有洞信息**（老手表）。
+    ///
+    /// ⚠️ 用 `beatOffsetsMillis.count` 而不是 `beatCount` 去定长度：
+    /// 间期是从**时间戳**推出来的，所以"有没有洞"必须和时间戳一一对应。
+    /// 长度对不上时 `GapPacking.unpack` 返回 `nil`，我们宁可当成"没有洞信息"。
+    var gapFlags: [Bool]? {
+        guard let packed = gapFlagsPacked else { return nil }
+        return GapPacking.unpack(packed, count: beatOffsetsMillis.count)
+    }
 
-    /// 相邻时间戳之差 = RR 间期。
+    /// 按洞切段 + 如实报出丢了多少。**这是所有下游分析的唯一入口。**
+    var intervalBreakdown: IntervalBreakdown {
+        Self.breakdown(fromOffsets: beatOffsetsMillis, gapFlags: gapFlags)
+    }
+
+    /// 连续的间期段。配对（Poincaré）必须逐段做。
+    var intervalRuns: [IntervalRun] { intervalBreakdown.runs }
+
+    /// RR 间期（毫秒）—— **由时间戳相邻相减得到，计算发生在手机上**。
+    ///
+    /// 已排除跨洞的间隔（见 `breakdown`）。拍平给 SDNN / 平均心率用是安全的。
+    var rrMillis: [Int] { intervalBreakdown.allIntervals }
+
+    /// 相邻时间戳之差 = RR 间期（**不做按洞切分**，只过滤非正值）。
     ///
     /// ⚠️ 只保留**正的**间隔：`HKHeartbeatSeriesQuery` 收尾那次回调
     /// **不保证带有效时间戳**（可能是 0 或重复值），那会算出 0 或负数。
@@ -195,15 +326,64 @@ struct HeartbeatSeriesPayload: Codable, Equatable, Sendable {
     ///
     /// 📌 这条规则原来在手表上（那时是边算边过滤）。位置挪到了手机上，**语义没变** ——
     /// 之所以能挪，正是因为手表现在只转发原始时间戳、不做任何判断。
+    ///
+    /// 📌 需要**配对**的场合（散点图）请改用 `breakdown`：这个函数不知道洞的存在。
     static func intervals(fromOffsets offsets: [Int]) -> [Int] {
-        guard offsets.count >= 2 else { return [] }
-        var result: [Int] = []
-        result.reserveCapacity(offsets.count - 1)
+        breakdown(fromOffsets: offsets, gapFlags: nil).allIntervals
+    }
+
+    /// 把逐拍时间戳 + 洞标记拆成连续段，并数清丢了多少。
+    ///
+    /// ## 两个过滤条件语义完全不同，**不要合并**
+    /// | 条件 | 含义 | 计数 |
+    /// |---|---|---|
+    /// | `delta <= 0` | 收尾回调带的脏时间戳（0 或重复） | `nonPositiveDropped` |
+    /// | `gapFlags[i] == true` | **Apple 说这一拍前面有洞、漏了拍** → 相邻相减不是真实间隔 | `gapCrossedDropped` |
+    ///
+    /// 第二个之前**从来没被检查过** —— 那是这个项目里一个真实的静默错误：
+    /// 漏 1 拍会把 800 ms 变成 1600 ms，而 1600 ms 落在生理范围内，
+    /// 于是它会伪装成一个真实的心跳间隔进图、并拉大 SDNN。
+    static func breakdown(fromOffsets offsets: [Int], gapFlags: [Bool]?) -> IntervalBreakdown {
+        guard offsets.count >= 2 else {
+            return IntervalBreakdown(runs: [], gapCrossedDropped: 0,
+                                     nonPositiveDropped: 0, hasGapInfo: gapFlags != nil)
+        }
+
+        var runs: [IntervalRun] = []
+        var current: [Int] = []
+        var currentStart = 0
+        var gapCrossed = 0
+        var nonPositive = 0
+
         for index in 1..<offsets.count {
             let delta = offsets[index] - offsets[index - 1]
-            if delta > 0 { result.append(delta) }
+            // 洞信息缺失时按"无洞"处理 —— 这是**假设**，由 hasGapInfo 如实带出去。
+            let crossedGap = gapFlags.map { index < $0.count && $0[index] } ?? false
+
+            if crossedGap {
+                gapCrossed += 1
+            } else if delta <= 0 {
+                nonPositive += 1
+            }
+
+            if delta > 0 && !crossedGap {
+                if current.isEmpty { currentStart = index - 1 }
+                current.append(delta)
+            } else {
+                if !current.isEmpty {
+                    runs.append(IntervalRun(intervals: current, startBeatIndex: currentStart))
+                }
+                current = []
+            }
         }
-        return result
+        if !current.isEmpty {
+            runs.append(IntervalRun(intervals: current, startBeatIndex: currentStart))
+        }
+
+        return IntervalBreakdown(runs: runs,
+                                 gapCrossedDropped: gapCrossed,
+                                 nonPositiveDropped: nonPositive,
+                                 hasGapInfo: gapFlags != nil)
     }
 
     /// 时间戳个数与拍数是否自洽。不自洽的序列**不该被画进图里**。

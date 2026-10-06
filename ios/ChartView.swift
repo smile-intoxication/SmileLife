@@ -350,6 +350,24 @@ private struct MetricChartCard: View {
         if result.outOfRange > 0 {
             parts.append("超出 \(Int(PoincareBuilder.minRR))–\(Int(PoincareBuilder.maxRR)) ms 剔除 \(result.outOfRange) 个")
         }
+        // ——— 跨洞的账 ———
+        // Apple 明确定义了 `precededByGap`：这一拍**前面有洞、漏了一拍或多拍**，
+        // 所以它和前一拍的时间差**不是一个真实的心跳间隔**。丢掉是对的，
+        // 但丢了多少必须说出来 —— 否则用户会以为"数据就这么多"（坑 #33）。
+        if result.gapCrossedDropped > 0 {
+            parts.append("跨洞（Apple 标为漏拍）丢弃 \(result.gapCrossedDropped) 个间隔")
+        }
+        if result.nonPositiveDropped > 0 {
+            parts.append("非正间隔丢弃 \(result.nonPositiveDropped) 个")
+        }
+        if result.runCount > result.seriesCount {
+            parts.append("序列被洞切成 \(result.runCount) 段")
+        }
+        if result.seriesWithoutGapInfo > 0 {
+            // ⚠️ 这些老数据是按"**没有洞**"的**假设**处理的，不是查证过的。
+            //    不说明的话，用户会把"没检查"误读成"检查过、没有洞"。
+            parts.append("\(result.seriesWithoutGapInfo) 条旧数据没有洞标记（按无洞处理）")
+        }
         if result.ectopicPairs > 0 {
             parts.append(filterEctopic
                          ? "按早搏剔除 \(result.ectopicPairs) 对"

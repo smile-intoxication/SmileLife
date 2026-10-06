@@ -29,8 +29,21 @@ struct RRSeriesData: Sendable {
     let startDate: Date
     let beatOffsetsMillis: [Int]
 
-    /// RR 间期（毫秒）—— 相邻时间戳之差，**在手机上算**
-    var rrMillis: [Int] { HeartbeatSeriesPayload.intervals(fromOffsets: beatOffsetsMillis) }
+    /// 每一拍的 `precededByGap`。`nil` = 这条记录**没有洞信息**（v3.2 之前的老数据）。
+    let gapFlags: [Bool]?
+
+    /// 按洞切段 + 如实报出丢了多少 —— 散点图和 SDNN 都从这里取数。
+    ///
+    /// ⚠️ **配对必须用 `runs` 逐段做**，不能直接拍平：
+    /// 拍平之后段边界就消失了，`rr[n]` 和 `rr[n+1]` 可能来自两段互不相连的记录，
+    /// 配出来的点是纯噪声 —— 而它在图上**看起来完全正常**，没法从图上看出来。
+    /// （和"跨序列配对"是同一类错误，那个已经用分组结构挡住了。）
+    var intervalBreakdown: IntervalBreakdown {
+        HeartbeatSeriesPayload.breakdown(fromOffsets: beatOffsetsMillis, gapFlags: gapFlags)
+    }
+
+    /// RR 间期（毫秒）—— 相邻时间戳之差，**在手机上算**。已排除跨洞的间隔。
+    var rrMillis: [Int] { intervalBreakdown.allIntervals }
 }
 
 /// 一次 RR 序列查询的结果。
@@ -66,6 +79,26 @@ struct PoincareResult {
     var ectopicPairs = 0
     /// 因为超过点数上限而抽稀过
     var isDownsampled = false
+
+    // MARK: - 跨洞过滤的账（**必须回报，不能静默丢**）
+
+    /// 因为**跨洞**而丢掉的间隔数。
+    ///
+    /// Apple 明确说过 `precededByGap` 意味着"漏了一拍或多拍"，
+    /// 所以这些差值不是真实的心跳间隔。丢掉是对的 ——
+    /// 但**必须让用户看见丢了多少**（静默丢弃比报错更糟：用户会以为"数据就这么多"）。
+    var gapCrossedDropped = 0
+    /// 因为非正而丢掉的（收尾回调可能带 0 或重复时间戳）
+    var nonPositiveDropped = 0
+    /// 有洞信息的序列数
+    var seriesWithGapInfo = 0
+    /// **没有**洞信息的序列数（老数据）—— 这些是按"无洞"假设处理的
+    var seriesWithoutGapInfo = 0
+    /// 被洞切出来的连续段总数。
+    ///
+    /// 它比"序列数"更能说明数据的**碎片化程度**：
+    /// 120 条序列切成 180 段，说明平均每条内部就有洞。
+    var runCount = 0
 
     /// 平均 RR（毫秒）—— 和散点图用同一批（已过范围过滤的）间期，保证数字和图对得上
     var meanRR: Double?
@@ -104,9 +137,19 @@ enum PoincareBuilder {
 
     /// 一张散点图最多画多少个点。
     ///
-    /// 按睡眠一晚算：每条序列约 100 拍、每 4 分钟一条 → 8 小时约 120 条序列
-    /// ≈ 1.2 万个间期。而手机上超过 3000 个点在视觉上已经是一团实心色块
-    /// （**不再增加信息量**），却明显拖慢渲染。所以超过就抽稀，并在界面上说明。
+    /// ## 量级按**用户真机实测**校准过（2026-10，v1.8 读数）
+    /// | 量 | 实测 |
+    /// |---|---|
+    /// | 单条序列 | **约 50 拍** → 约 49 个间期 |
+    /// | 间隔 | **约 4 分钟一条**（房颤历史开启） |
+    /// | 一夜 8 小时 | 约 **120 条**序列 → 约 **5900** 个间期 |
+    ///
+    /// 所以一晚上的点数在 5000 上下，**会真的触发抽稀**（不是防御性代码）。
+    /// 而手机上超过 3000 个点在视觉上已经是一团实心色块
+    /// （**不再增加信息量**），却明显拖慢渲染。所以超过就均匀抽稀，并在界面上说明。
+    ///
+    /// ⚠️ 这里以前写的是"每条序列约 100 拍"—— 比实测大了约一倍，已按上面的数字改。
+    /// 条数（约 120 条/夜）那半是对的。
     static let maxPoints = 3000
 
     /// 构造散点图。
@@ -122,54 +165,74 @@ enum PoincareBuilder {
         var nnIntervals: [Double] = []
 
         for (seriesIndex, item) in series.enumerated() {
-            let rr = item.rrMillis.map(Double.init)
-            guard rr.count >= 2 else { continue }
+            let breakdown = item.intervalBreakdown
 
-            result.rawIntervals += rr.count
-
-            // ——— NN 间期：给 SDNN / 平均心率用 ———
-            // ⚠️ 这里必须算 **NN（normal-to-normal）** 而不是原始间期。
-            //    SDNN 的定义就是"NN 间期的标准差"，而早搏会把 SDNN 显著**拉大**
-            //    （这是 SDNN 虚高最常见的原因）。用原始间期算，数字看着漂亮但没意义。
-            //    顺带：开关切到"剔除"时，图变了 SDNN 也必须跟着变，
-            //    否则同一屏上两个数字互相矛盾。
-            for index in 0..<rr.count {
-                let value = rr[index]
-                guard value >= minRR, value <= maxRR else {
-                    result.outOfRange += 1
-                    continue
-                }
-                // 早搏判定：和**前一个**间期比。第一个间期没有前一个，直接算合格。
-                if index > 0, filterEctopic,
-                   abs(value - rr[index - 1]) > maxDeltaRatio * rr[index - 1] {
-                    continue
-                }
-                nnIntervals.append(value)
+            // ——— 先记账：跨洞丢了多少（**要显示出来**）———
+            result.gapCrossedDropped += breakdown.gapCrossedDropped
+            result.nonPositiveDropped += breakdown.nonPositiveDropped
+            if breakdown.hasGapInfo {
+                result.seriesWithGapInfo += 1
+            } else {
+                result.seriesWithoutGapInfo += 1
             }
 
-            // ⚠️ 配对**只在同一条序列内**做。
-            //    跨序列配对会把"这次测量的最后一次心跳"和"下一次测量的第一次心跳"
-            //    连成一个点，而那个点横纵坐标来自相隔几分钟的两次测量 —— 纯噪声，
-            //    而且会在图上形成沿着边界的离群点阵，把真正的云团压扁。
-            for index in 0..<(rr.count - 1) {
-                let previous = rr[index]
-                let next = rr[index + 1]
+            // ⚠️ 逐段处理。两层的"不许跨越"叠在一起：
+            //    · 不许跨**序列**（每次测量之间隔着几分钟）
+            //    · 不许跨**洞**（同一条序列内部漏了拍 —— Apple 用 precededByGap 标出来了）
+            //    两者的后果一样：配出来的点来自两段互不相连的记录，是纯噪声，
+            //    而且**在图上完全看不出来**。
+            for run in breakdown.runs {
+                let rr = run.intervals.map(Double.init)
+                guard !rr.isEmpty else { continue }
+                result.runCount += 1
+                result.rawIntervals += rr.count
 
-                // 两个值都必须落在生理范围内才配对
-                guard previous >= minRR, previous <= maxRR,
-                      next >= minRR, next <= maxRR else { continue }
-
-                // 早搏判定**总是统计**（界面上要如实说明剔除了多少），
-                // 但只有开关打开时才真的丢弃。
-                let isEctopic = abs(next - previous) > maxDeltaRatio * previous
-                if isEctopic {
-                    result.ectopicPairs += 1
-                    if filterEctopic { continue }
+                // ——— NN 间期：给 SDNN / 平均心率用 ———
+                // ⚠️ 这里必须算 **NN（normal-to-normal）** 而不是原始间期。
+                //    SDNN 的定义就是"NN 间期的标准差"，而早搏会把 SDNN 显著**拉大**
+                //    （这是 SDNN 虚高最常见的原因）。用原始间期算，数字看着漂亮但没意义。
+                //    顺带：开关切到"剔除"时，图变了 SDNN 也必须跟着变，
+                //    否则同一屏上两个数字互相矛盾。
+                // ⚠️ 早搏是"和前一个间期比"，所以那个"前一个"必须在**同一段**里 ——
+                //    跨段的比较等于拿隔着空洞的两个数作比较。
+                for index in 0..<rr.count {
+                    let value = rr[index]
+                    guard value >= minRR, value <= maxRR else {
+                        result.outOfRange += 1
+                        continue
+                    }
+                    // 段内第一个间期没有"前一个"，直接算合格。
+                    if index > 0, filterEctopic,
+                       abs(value - rr[index - 1]) > maxDeltaRatio * rr[index - 1] {
+                        continue
+                    }
+                    nnIntervals.append(value)
                 }
 
-                candidates.append(PoincarePoint(id: "\(seriesIndex)-\(index)",
-                                                rrN: previous,
-                                                rrNext: next))
+                guard rr.count >= 2 else { continue }
+
+                for index in 0..<(rr.count - 1) {
+                    let previous = rr[index]
+                    let next = rr[index + 1]
+
+                    // 两个值都必须落在生理范围内才配对
+                    guard previous >= minRR, previous <= maxRR,
+                          next >= minRR, next <= maxRR else { continue }
+
+                    // 早搏判定**总是统计**（界面上要如实说明剔除了多少），
+                    // 但只有开关打开时才真的丢弃。
+                    let isEctopic = abs(next - previous) > maxDeltaRatio * previous
+                    if isEctopic {
+                        result.ectopicPairs += 1
+                        if filterEctopic { continue }
+                    }
+
+                    // id 里带上**段起点的拍序号**：段内序号只在段内有意义，
+                    // 只用 "序列-段内序号" 会让不同段的点撞 id（List/ForEach 会出问题）。
+                    candidates.append(PoincarePoint(id: "\(seriesIndex)-\(run.startBeatIndex)-\(index)",
+                                                    rrN: previous,
+                                                    rrNext: next))
+                }
             }
         }
 

@@ -155,6 +155,21 @@ final class HeartbeatSeriesRecord {
     /// `ModelContainer` 打不开 —— 那是**每次启动都崩**，代价太大。
     var offsetsPacked: Data?
 
+    /// 每一拍的 `precededByGap` 标记，已按 `GapPacking` 打包（每拍 1 bit）。
+    ///
+    /// ## 为什么它非存不可
+    /// Apple 明确说明这个标记的意思是「**这一拍前面有洞，可能漏了一拍或多拍**」——
+    /// 也就是"这一拍和前一拍的时间差**不是**一个真实的心跳间隔"。
+    /// 我们的 RR 间期正是相邻相减算出来的，所以跨洞那个值必须丢掉。
+    /// 不丢的后果：漏 1 拍把 800 ms 变成 1600 ms，而 1600 ms 落在
+    /// 手机端 300–2000 ms 的生理范围内，会伪装成真实间隔进图并拉大 SDNN。
+    ///
+    /// ⚠️ **Optional 是为了不改 schema，同时也为了兼容老数据**：
+    /// 给已有的 `@Model` 加一个可选属性是 SwiftData 的轻量迁移（安全）；
+    /// 而 v3.2 之前存下来的记录本来就没有这个字段 —— 那种情况下语义是
+    /// 「**没有洞信息**」，不是「没有洞」。见 `IntervalBreakdown.hasGapInfo`。
+    var gapsPacked: Data?
+
     /// **旧格式**：逐拍间隔（毫秒），已打包。
     ///
     /// 新记录一律写空 `Data()`。留着这个属性是为了 schema 稳定，
@@ -177,6 +192,7 @@ final class HeartbeatSeriesRecord {
          startDate: Date,
          endDate: Date,
          offsetsPacked: Data? = nil,
+         gapsPacked: Data? = nil,
          rrPacked: Data = Data(),
          beatCount: Int,
          ingestedAt: Date = .now,
@@ -188,6 +204,7 @@ final class HeartbeatSeriesRecord {
         self.startDate = startDate
         self.endDate = endDate
         self.offsetsPacked = offsetsPacked
+        self.gapsPacked = gapsPacked
         self.rrPacked = rrPacked
         self.beatCount = beatCount
         self.ingestedAt = ingestedAt
@@ -203,6 +220,9 @@ final class HeartbeatSeriesRecord {
                                startDate: startDate,
                                endDate: endDate,
                                beatOffsetsPacked: offsetsPacked,
+                               // 洞标记原样带上手机。老记录这里是 nil，
+                               // 手机端会把它当成"没有洞信息"（而不是"没有洞"）。
+                               gapFlagsPacked: gapsPacked,
                                // 老记录（v2.1 以及更早）没有 offsets，只有间期。
                                // 原样带上去，让手机去累加成时间戳。
                                rrPacked: offsetsPacked == nil ? rrPacked : nil,

@@ -391,11 +391,13 @@ actor PhoneStore {
             // ⚠️ 跳过**不自洽**的序列（时间戳个数与拍数对不上）。
             //    画出来会是一堆凭空捏造的间期，比不画更糟。
             guard record.isSelfConsistent else { return nil }
-            // 只把**原始时间戳**交出去，RR 间期由 `RRSeriesData` 自己算 ——
+            // 只把**原始时间戳 + 洞标记**交出去，RR 间期由 `RRSeriesData` 自己算 ——
             // 这样"在哪里算 RR"这件事只有一个答案（手机），不会两边各算一份。
+            // 洞标记一起带上：跨洞的差值不是一个真实的心跳间隔，必须能过滤掉。
             return RRSeriesData(seriesUUID: record.uuid,
                                 startDate: record.startDate,
-                                beatOffsetsMillis: record.beatOffsetsMillis)
+                                beatOffsetsMillis: record.beatOffsetsMillis,
+                                gapFlags: record.gapFlags)
         }
 
         return RRSeriesFetch(series: series, isTruncated: records.count >= seriesLimit)

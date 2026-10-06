@@ -181,6 +181,16 @@ final class PhoneHeartbeatSeries {
     /// 打不开 —— 那是**每次启动都崩**，而手机上的数据是长期档案，不能拿来冒险。
     var offsetsPacked: Data?
 
+    /// 每一拍的 `precededByGap` 标记（每拍 1 bit）。
+    ///
+    /// Apple 的定义是「这一拍**前面有洞**，可能漏了一拍或多拍」——
+    /// 也就是它和前一拍之间的时间差**不是一个真实的心跳间隔**。
+    /// 手机端算 RR 靠的正是相邻相减，所以必须拿它把跨洞那些值排除掉。
+    ///
+    /// ⚠️ `nil` 的语义是「**没有洞信息**」（v3.2 之前的手表发的老数据），
+    /// **不是**「没有洞」。这个区别会一路带到界面上（见 `IntervalBreakdown.hasGapInfo`）。
+    var gapsPacked: Data?
+
     /// **旧格式**：手表算好的逐拍间隔（毫秒），已打包。
     ///
     /// 新记录写空 `Data()`。留着是为了让 v2.1 时期已经同步过来的那批序列
@@ -203,6 +213,7 @@ final class PhoneHeartbeatSeries {
         self.startDate = payload.startDate
         self.endDate = payload.endDate
         self.offsetsPacked = payload.beatOffsetsPacked
+        self.gapsPacked = payload.gapFlagsPacked
         self.rrPacked = payload.beatOffsetsPacked == nil ? (payload.rrPacked ?? Data()) : Data()
         self.beatCount = payload.beatCount
         self.sourceName = payload.sourceName
@@ -221,8 +232,14 @@ final class PhoneHeartbeatSeries {
         // 逐拍数据没变时这次赋值是幂等的。
         let newOffsets = payload.beatOffsetsPacked
         let newRR = newOffsets == nil ? (payload.rrPacked ?? Data()) : Data()
-        if newOffsets != self.offsetsPacked || newRR != self.rrPacked || payload.beatCount != self.beatCount {
+        // ⚠️ 洞标记也要一起比：老手表发来的载荷没有这个字段，
+        //    于是同一批数据可能"第一次没有洞信息、补发时才带上"——
+        //    漏掉这个比较的话那条序列会永远停在"没有洞信息"的状态。
+        let newGaps = payload.gapFlagsPacked
+        if newOffsets != self.offsetsPacked || newRR != self.rrPacked
+            || newGaps != self.gapsPacked || payload.beatCount != self.beatCount {
             self.offsetsPacked = newOffsets
+            self.gapsPacked = newGaps
             self.rrPacked = newRR
             self.beatCount = payload.beatCount
         }
@@ -242,8 +259,25 @@ final class PhoneHeartbeatSeries {
         return offsets
     }
 
-    /// RR 间期（毫秒）—— **在手机上由时间戳相邻相减算出来**
-    var rrMillis: [Int] { HeartbeatSeriesPayload.intervals(fromOffsets: beatOffsetsMillis) }
+    /// 每一拍的 `precededByGap`。`nil` = **这条记录没有洞信息**（v3.2 之前存的）。
+    var gapFlags: [Bool]? {
+        guard let packed = gapsPacked else { return nil }
+        // ⚠️ 用时间戳个数定长度，不是 `beatCount`：间期是从时间戳推出来的，
+        //    洞标记必须和时间戳一一对应。长度对不上时 `unpack` 返回 nil。
+        return GapPacking.unpack(packed, count: beatOffsetsMillis.count)
+    }
+
+    /// 按洞切段 + 丢了多少 —— **散点图和 SDNN 都从这里取数**。
+    var intervalBreakdown: IntervalBreakdown {
+        HeartbeatSeriesPayload.breakdown(fromOffsets: beatOffsetsMillis, gapFlags: gapFlags)
+    }
+
+    /// RR 间期（毫秒）—— **在手机上由时间戳相邻相减算出来**。
+    ///
+    /// 已排除跨洞的间隔。拍平后给 SDNN / 平均心率用是安全的
+    /// （跨洞那个值已经丢掉了，剩下的都是真实间隔）。
+    /// 但**配对**必须用 `intervalBreakdown.runs` 逐段做。
+    var rrMillis: [Int] { intervalBreakdown.allIntervals }
 
     /// 时间戳个数与拍数是否自洽 —— 不自洽的序列**不该被画进图里**
     /// （会画出一堆凭空捏造的间期）。
