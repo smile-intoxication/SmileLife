@@ -73,7 +73,10 @@ struct DiagnosticsView: View {
             Section("iPhone 连接") {
                 row("WCSession 支持", report.linkSupported ? "是" : "❌ 否（模拟器？）")
                 row("会话状态", report.linkActivation)
-                row("已配对手表", report.linkPaired ? "是" : "❌ 否")
+                // ⚠️ 这里**刻意没有**「已配对手表」那一行：
+                //    `WCSession.isPaired` 是 **iOS 专属**（头文件里标了 __WATCHOS_UNAVAILABLE），
+                //    在手表端取它编译不过。而且语义上也没意义 —— 手表本来就是被配对的一方。
+                //    手表真正需要知道的是"手机上装没装本 App"，那是 isCompanionAppInstalled。
                 row("手机已装 App", report.companionInstalled ? "是" : "❌ 否")
                 row("当前可达", report.linkReachable ? "是" : "否（正常，后台几乎不可达）")
 
@@ -259,7 +262,6 @@ struct DiagnosticsView: View {
         let link = WatchLinkSession.shared
         r.linkSupported = link.isSupported
         r.linkActivation = link.activationStateText
-        r.linkPaired = link.isPaired
         r.companionInstalled = link.isCompanionAppInstalled
         r.linkReachable = link.isReachable
         r.outstandingTransfers = link.outstandingCount
@@ -340,7 +342,6 @@ struct DiagnosticsReport {
     // ——— 传往 iPhone 的通道 ———
     var linkSupported = false
     var linkActivation = "—"
-    var linkPaired = false
     var companionInstalled = false
     var linkReachable = false
     var outstandingTransfers = 0

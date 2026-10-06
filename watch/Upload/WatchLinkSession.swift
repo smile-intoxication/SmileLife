@@ -88,7 +88,17 @@ final class WatchLinkSession: NSObject {
         }
     }
 
-    var isPaired: Bool { session?.isPaired ?? false }
+    // ⚠️ 这里**只能**放 watchOS 上可用的属性。
+    //
+    // WCSession 的属性在两个平台上是**不对称**的，而用错方向只会在
+    // "编译另一个平台"时才报错（对于一个只在 watch target 里的文件来说，
+    // 就是第一次编译时才会发现）：
+    //   · watchOS 有：`isCompanionAppInstalled`、`isReachable`、`outstandingUserInfoTransfers`
+    //   · **watchOS 没有**：`isPaired`、`isWatchAppInstalled`（这两个是 iOS 专属，
+    //     头文件里标了 `__WATCHOS_UNAVAILABLE`）
+    // 实测踩到过：写了一行 `session?.isPaired`，CI 报
+    //   `error: 'isPaired' is unavailable in watchOS`（Issue #5）。
+    // 自检脚本第 13 节现在会守住这条。
     var isCompanionAppInstalled: Bool { session?.isCompanionAppInstalled ?? false }
     var isReachable: Bool { session?.isReachable ?? false }
     var outstandingCount: Int { session?.outstandingUserInfoTransfers.count ?? 0 }

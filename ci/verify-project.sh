@@ -505,6 +505,36 @@ else
   bad "iPhone 端没有校验 SampleBatch.currentVersion —— 版本不匹配时会静默丢数据"
 fi
 
+# ---------- 14. WCSession 属性的平台不对称 ----------
+# WCSession 的属性在 iOS 与 watchOS 上**不是同一套**，用错方向只会在
+# "编译另一个平台"时报错 —— 对于一个只属于某个 target 的文件来说，
+# 那就是它**第一次被编译**的时候（手表端那个文件也是这么炸的）。
+# 这类错误靠类型系统在 Windows 上抓不到，但能抓名字。
+#
+#   · `isPaired` / `isWatchAppInstalled`  → **iOS 专属**（头文件标了 __WATCHOS_UNAVAILABLE）
+#   · `isCompanionAppInstalled`           → **watchOS 专属**（__IOS_UNAVAILABLE）
+#
+# 实测踩到过：手表端写了一行 `session?.isPaired`，CI 报
+#   `error: 'isPaired' is unavailable in watchOS`（Issue #5）。
+section "14. WCSession 属性的平台不对称"
+IOS_ONLY_HIT=$(for f in $(grep -rl -E 'isPaired|isWatchAppInstalled' watch --include='*.swift' 2>/dev/null); do
+                 code_only "$f"
+               done | grep -c -E 'isPaired|isWatchAppInstalled')
+if [ "$IOS_ONLY_HIT" -gt 0 ]; then
+  bad "watch/ 里用了 WCSession 的 iOS 专属属性（isPaired / isWatchAppInstalled）—— watchOS 上是 __WATCHOS_UNAVAILABLE，编译不过"
+else
+  ok "watch/ 没有用 WCSession 的 iOS 专属属性"
+fi
+
+WATCH_ONLY_HIT=$(for f in $(grep -rl 'isCompanionAppInstalled' ios --include='*.swift' 2>/dev/null); do
+                   code_only "$f"
+                 done | grep -c 'isCompanionAppInstalled')
+if [ "$WATCH_ONLY_HIT" -gt 0 ]; then
+  bad "ios/ 里用了 isCompanionAppInstalled —— 它是 watchOS 专属（__IOS_UNAVAILABLE），iOS 上编译不过"
+else
+  ok "ios/ 没有用 watchOS 专属的 WCSession 属性"
+fi
+
 # ---------- 汇总 ----------
 printf '\n== 汇总：%d 通过，%d 失败\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
