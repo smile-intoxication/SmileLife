@@ -363,6 +363,36 @@ jobs:
       - name: 生成工程
         run: xcodegen generate --spec project.yml
 
+      # 清理 CI 自己造出来的旧开发证书。
+      #
+      # ⚠️ 为什么需要：runner **每次都是全新机器、keychain 里没有任何私钥**，
+      #    云端签名（`-allowProvisioningUpdates`）复用不了已有证书，只能在 Apple 那边
+      #    **新造一对密钥 + 一张证书** —— 于是**每发布一次烧掉一个额度**。
+      #    攒到上限（实测 12 张）就再也签不了名，v2.1 的 Archive 就是这么挂的：
+      #      error: Choose a certificate to revoke. Your account has reached the
+      #             maximum number of certificates.
+      #      error: No profiles for 'com.smile.intoxication.applewatchhealth' were found
+      #
+      # 边界（刻意收得很紧，见 `ci/prune-dev-certs.py` 的注释）：
+      #    只动 **同时满足** `certificateType == DEVELOPMENT`、
+      #    `displayName == "Created via API"`、且不在最新 2 张之内的证书。
+      #    用户手工在门户里建的证书名字是别的，一律不碰。
+      #    这些证书的私钥早随 runner 销毁、一张都复用不了；
+      #    而**已经上传到 App Store Connect 的构建不受证书吊销影响**（包早就交付了）。
+      #
+      # ⚠️ `continue-on-error`：这是**维护动作，不是发布前提**。
+      #    清理失败绝不能让发布失败 —— 脚本内部也自己兜住了错误（双保险）。
+      - name: 清理旧的开发证书（避免证书额度被 CI 用满）
+        continue-on-error: true
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          # ⚠️ `~` 在环境变量里**不会被 shell 展开**，所以必须用 $HOME 拼绝对路径。
+          #    （Archive 那一步可以直接写 `~/...`，因为那是 shell 展开的。）
+          export ASC_KEY_PATH="$HOME/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          python3 ci/prune-dev-certs.py --keep 2
+
       # ⚠️ compile job 里也有一段同样的探测。两个 job 必须用同一套编译设置，
       #    否则会出现「CI 验证过的配置 ≠ 实际发货的配置」。
       #    （历史教训：RMSSD 曾被 #if HAS_WATCHOS_27_SDK 门控，而那个条件在 CI 上

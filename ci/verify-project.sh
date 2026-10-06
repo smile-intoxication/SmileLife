@@ -243,6 +243,35 @@ else
   bad "诊断步骤只检查了 failure()（只找到 $N_DIAG 处，应 ≥2）—— 编译步骤带 continue-on-error，它的失败被掩掉，Issue 永远不会建"
 fi
 
+# 证书清理那一步必须存在，而且必须带 `continue-on-error: true`。
+#
+# 为什么守：**它是维护动作，不是发布前提**。清理失败绝不能让发布失败 ——
+# 否则"证书额度满了"这个本来可以放行的问题，会连带把整个发布堵死。
+# 反过来，这一步不存在的话，每发布一次就烧掉一个证书额度，
+# 攒够上限（实测 12 张）之后 Archive 会直接失败（v2.1 就是这么挂的）。
+if [ -f ci/prune-dev-certs.py ]; then
+  ok "证书清理脚本存在（ci/prune-dev-certs.py）"
+else
+  bad "缺少 ci/prune-dev-certs.py —— 没有它，每发布一次烧掉一个证书额度，攒满就再也签不了名"
+fi
+
+CERT_GUARD=$(awk '
+  /清理旧的开发证书/ { inblock = 1; next }
+  inblock && /^      - name:/ { inblock = 0 }
+  inblock && /continue-on-error: true/ { print "yes"; exit }
+' .github/workflows/build.yml 2>/dev/null)
+if [ "$CERT_GUARD" = "yes" ]; then
+  ok "证书清理步骤带 continue-on-error（维护动作不会堵死发布）"
+else
+  bad "证书清理步骤没有 continue-on-error: true —— 清理失败会连带让发布失败"
+fi
+
+if grep -q 'prune-dev-certs.py' .github/workflows/build.yml 2>/dev/null; then
+  ok "workflow 已接入证书清理"
+else
+  bad "workflow 没有调用 ci/prune-dev-certs.py"
+fi
+
 rm -rf "$TMPD"
 
 # ---------- 9. App 图标（缺了会被 App Store 上传直接拒收） ----------
