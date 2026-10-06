@@ -181,11 +181,18 @@ jobs:
       # 也能远程（让 AI 助手）读出真实的编译错误。
       # ------------------------------------------------------------
       - name: 收集环境诊断
-        # ⚠️ 用 failure() 而不是 steps.build.outcome == 'failure'：
-        #    brew / xcode-select / xcodegen / SDK 探测 这些步骤也可能失败，
-        #    那时 steps.build 是 skipped 而不是 failure，诊断就完全不会跑
-        #    —— 而「runner 换镜像后没有 watchOS SDK」恰恰是最需要远程诊断的情况。
-        if: failure()
+        # ⚠️ 必须是 `failure() || steps.build.outcome == 'failure'`，不能只写 `failure()`。
+        #
+        # 原因：上面的「编译」步骤带 `continue-on-error: true`（为了让 job 走到最后
+        # 统一汇总，而不是在中途就断掉）。而 `continue-on-error` 会把那一步的失败
+        # **掩掉** —— 此后所有步骤看到的 `failure()` 都是 **false**。
+        # 结果就是：**编译失败时诊断步骤完全不会跑，Issue 也永远不会建**，
+        # 而"编译失败"恰恰是最需要远程诊断的情况（开发机是 Windows，看不到日志）。
+        # 实测踩到过：run #26 编译失败，仓库里没有新建任何 Issue。
+        #
+        # 注意 `outcome` 与 `conclusion` 的区别：`outcome` 是**应用 continue-on-error 之前**
+        # 的结果，`conclusion` 是之后的（会被强制成 success）。所以这里必须用 outcome。
+        if: failure() || steps.build.outcome == 'failure'
         run: |
           # ⚠️ 诊断步骤本身**绝不能**因为"没找到 error"之类的原因失败。
           #    run #6 的教训：产物断言失败 → 诊断步骤也失败 → ci-report.md 没生成
@@ -210,7 +217,8 @@ jobs:
           echo "环境诊断已写入 ci-env.txt（含 stderr）"
 
       - name: 发布失败诊断到 Issue
-        if: failure()
+        # 同上：必须带上 steps.build.outcome，否则「编译失败」这一类永远不会建 Issue
+        if: failure() || steps.build.outcome == 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

@@ -231,6 +231,18 @@ for f in ci/*.sh; do
   fi
 done
 
+# 「编译」步骤带 `continue-on-error: true`（为了让 job 走到最后统一汇总），
+# 而 continue-on-error 会把那一步的失败**掩掉** —— 此后所有步骤看到的 `failure()`
+# 都是 **false**。诊断步骤如果只写 `if: failure()`，**编译失败时 Issue 永远不会建**，
+# 而"编译失败"恰恰是最需要远程诊断的情况（开发机是 Windows，看不到日志）。
+# 实测踩到过：run #26 编译失败，仓库里没有新建任何 Issue，只能靠人下载 artifact。
+N_DIAG=$(grep -c "if: failure() || steps.build.outcome == 'failure'" .github/workflows/build.yml 2>/dev/null)
+if [ "$N_DIAG" -ge 2 ]; then
+  ok "编译诊断步骤同时检查 failure() 与 steps.build.outcome（编译失败也会建 Issue）"
+else
+  bad "诊断步骤只检查了 failure()（只找到 $N_DIAG 处，应 ≥2）—— 编译步骤带 continue-on-error，它的失败被掩掉，Issue 永远不会建"
+fi
+
 rm -rf "$TMPD"
 
 # ---------- 9. App 图标（缺了会被 App Store 上传直接拒收） ----------
