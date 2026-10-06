@@ -19,6 +19,15 @@ struct OverviewView: View {
     /// 而把空的也列出来，"这几个指标没数据"才是事实。
     private var rowsWithoutData: [PhoneMetricSummary] { summaries.filter { !$0.hasData } }
 
+    /// 汇总文案。
+    ///
+    /// 单独算成 `String` 而不是写在 `Text(... + ...)` 里：字符串插值写在
+    /// ViewBuilder 表达式中会明显加重 SwiftUI 的类型推导负担
+    /// （同一个项目里的 ChartView 就因为类型推导超时在 CI 上失败过）。
+    private var receiptSummary: String {
+        "共 \(PhoneFormat.number(totalSamples)) 条样本，最后收到于 \(PhoneFormat.relative(status.lastReceivedAt))"
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -46,14 +55,12 @@ struct OverviewView: View {
                         } header: {
                             Text("尚未收到")
                         } footer: {
-                            Text("这些指标手表端可能没有开启权限，或这台设备本来就不产生该类型的数据。"
-                                 + "具体原因可以在手表上的「诊断」界面看到。")
+                            Text("这些指标手表端可能没有开启权限，或这台设备本来就不产生该类型的数据。具体原因可以在手表上的「诊断」界面看到。")
                         }
                     }
 
                     Section {
-                        Text("共 \(PhoneFormat.number(totalSamples)) 条样本，"
-                             + "最后收到于 \(PhoneFormat.relative(status.lastReceivedAt))")
+                        Text(receiptSummary)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }

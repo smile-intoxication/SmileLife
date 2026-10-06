@@ -18,6 +18,8 @@ struct ChartView: View {
 
     @State private var points: [ChartPoint] = []
     @State private var sleepDays: [SleepDayBar] = []
+    /// 拍平后的睡眠片段（`Chart` 直接吃这个，不现算 —— 见 `SleepChartSegment` 的注释）
+    @State private var sleepSegments: [SleepChartSegment] = []
     @State private var stats: ChartStats?
     @State private var isLoading = false
     @State private var hasLoadedOnce = false
@@ -58,6 +60,23 @@ struct ChartView: View {
 
     // MARK: - 选择器
 
+    /// 指标选择器的标签。
+    ///
+    /// 单独拆出来不是为了复用，而是为了**压平类型推导**：
+    /// `Menu { ... } label: { 一长串带修饰符的 HStack }` 这种嵌套很容易让
+    /// SwiftUI 的类型推导变慢甚至超时（同一个文件里的 `sleepContent` 就超时过）。
+    private var metricMenuLabel: some View {
+        HStack {
+            Image(systemName: info.symbolName)
+            Text(info.title).font(.headline)
+            Spacer()
+            Image(systemName: "chevron.up.chevron.down").font(.caption)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+    }
+
     private var selectors: some View {
         VStack(alignment: .leading, spacing: 10) {
             Menu {
@@ -69,15 +88,7 @@ struct ChartView: View {
                     }
                 }
             } label: {
-                HStack {
-                    Image(systemName: info.symbolName)
-                    Text(info.title).font(.headline)
-                    Spacer()
-                    Image(systemName: "chevron.up.chevron.down").font(.caption)
-                }
-                .padding(.vertical, 10)
-                .padding(.horizontal, 14)
-                .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                metricMenuLabel
             }
 
             Picker("时间范围", selection: $range) {
@@ -127,25 +138,22 @@ struct ChartView: View {
 
     @ViewBuilder
     private var sleepContent: some View {
-        if sleepDays.isEmpty {
+        if sleepSegments.isEmpty {
             if isLoading || !hasLoadedOnce {
                 loadingPlaceholder
             } else {
                 emptyPlaceholder
             }
         } else {
-            Chart {
-                ForEach(sleepDays) { day in
-                    ForEach(MetricDisplay.sleepStageOrder, id: \.self) { stage in
-                        if let hours = day.hoursByStage[stage], hours > 0.01 {
-                            BarMark(x: .value("日期", day.day, unit: .day),
-                                    y: .value("小时", hours))
-                                .foregroundStyle(by: .value("阶段",
-                                                            MetricDisplay.categoryLabel(metricID: metricID,
-                                                                                        raw: stage)))
-                        }
-                    }
-                }
+            // ⚠️ 这里刻意只有**一层 ForEach + 一个 BarMark**。
+            //    原来写成"ForEach 套 ForEach + if let + 字符串插值"，
+            //    直接让 SwiftUI 的类型推导超时（CI 报
+            //    "the compiler is unable to type-check this expression in reasonable time"）。
+            //    数据已经在 `ChartSeriesBuilder.sleepSegments` 里拍平好了。
+            Chart(sleepSegments) { segment in
+                BarMark(x: .value("日期", segment.day, unit: .day),
+                        y: .value("小时", segment.hours))
+                    .foregroundStyle(by: .value("阶段", segment.stageLabel))
             }
             .chartForegroundStyleScale([
                 "深睡": Color.indigo,
@@ -266,7 +274,10 @@ struct ChartView: View {
                 let samples = try await store.categorySamples(metricID: metricID,
                                                               from: window.from,
                                                               to: window.to)
-                sleepDays = ChartSeriesBuilder.sleepDays(from: samples)
+                let days = ChartSeriesBuilder.sleepDays(from: samples)
+                sleepDays = days
+                // 拍平放到这里做，视图里就只剩渲染
+                sleepSegments = ChartSeriesBuilder.sleepSegments(from: days)
                 points = []
                 stats = nil
             } else {
@@ -278,6 +289,7 @@ struct ChartView: View {
                 points = built
                 stats = ChartSeriesBuilder.stats(from: built)
                 sleepDays = []
+                sleepSegments = []
             }
             loadError = nil
         } catch {

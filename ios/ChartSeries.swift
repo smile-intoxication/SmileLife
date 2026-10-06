@@ -87,6 +87,30 @@ struct SleepDayBar: Identifiable {
     let totalSleepHours: Double
 }
 
+/// 睡眠图表里的**一段**（已经拍平成 `Chart` 能直接吃的形式）。
+///
+/// ## 为什么要先拍平，而不是在 `Chart { }` 里现算
+/// 原来直接在 Chart 里写「`ForEach` 套 `ForEach` + `if let` + 字符串插值」，
+/// 结果 **SwiftUI 的类型推导超时**，CI 报：
+///
+///     ios/ChartView.swift:129:41: error: the compiler is unable to type-check
+///     this expression in reasonable time; try breaking up the expression
+///     into distinct sub-expressions
+///
+/// 这类错误在 Windows 上完全看不出来（没有编译器），只能靠 CI 暴露。
+/// 把数据先算成 `[SleepChartSegment]`（字段类型全部写死），
+/// `Chart` 的 body 就只剩**一层 `ForEach` + 一个 `BarMark`**，类型推导瞬间结束。
+///
+/// 顺带的好处：视图层不再需要知道"哪些阶段要跳过"这种业务规则。
+struct SleepChartSegment: Identifiable {
+    let id: String
+    /// 这一天（按**起床时间**归属，见 `ChartSeriesBuilder.sleepDays`）
+    let day: Date
+    /// 已经翻译好的阶段名（`Chart` 直接用，不再在视图里调函数）
+    let stageLabel: String
+    let hours: Double
+}
+
 struct ChartStats {
     let average: Double
     let minValue: Double
@@ -202,6 +226,27 @@ enum ChartSeriesBuilder {
             }
             return SleepDayBar(day: day, hoursByStage: stages, totalSleepHours: asleep)
         }
+    }
+
+    /// 把"每天各阶段时长"拍平成 Chart 直接可用的片段。
+    ///
+    /// 顺手丢掉小于 `0.01` 小时（36 秒）的碎片：
+    /// 手表上睡眠阶段一段只有几十秒时很常见，画出来是**看不见的一条线**，
+    /// 却会让点数翻好几倍 —— 图看起来更慢、更乱，信息量却一点没多。
+    static func sleepSegments(from days: [SleepDayBar]) -> [SleepChartSegment] {
+        var result: [SleepChartSegment] = []
+        for day in days {
+            for stage in MetricDisplay.sleepStageOrder {
+                guard let hours = day.hoursByStage[stage], hours > 0.01 else { continue }
+                result.append(SleepChartSegment(
+                    id: "\(Int(day.day.timeIntervalSince1970))-\(stage)",
+                    day: day.day,
+                    stageLabel: MetricDisplay.categoryLabel(metricID: "sleep_analysis", raw: stage),
+                    hours: hours
+                ))
+            }
+        }
+        return result
     }
 
     /// "睡着"的阶段。
