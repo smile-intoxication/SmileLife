@@ -66,6 +66,36 @@ struct DiagnosticsView: View {
                     .foregroundStyle(.tertiary)
             }
 
+            // ——— 3.5 传往 iPhone 的通道 ———
+            // 这一节存在的理由和整个诊断界面一样：开发机是 Windows，
+            // 看不到设备日志。「手机上没数据」可能是五六种完全不同的原因，
+            // 只有把这几项分开显示才能定位。
+            Section("iPhone 连接") {
+                row("WCSession 支持", report.linkSupported ? "是" : "❌ 否（模拟器？）")
+                row("会话状态", report.linkActivation)
+                row("已配对手表", report.linkPaired ? "是" : "❌ 否")
+                row("手机已装 App", report.companionInstalled ? "是" : "❌ 否")
+                row("当前可达", report.linkReachable ? "是" : "否（正常，后台几乎不可达）")
+
+                row("待发送样本", "\(report.outboxPending) 条")
+                row("待转发删除", "\(report.pendingDeletions) 条")
+                row("系统队列中", "\(report.outstandingTransfers) 个传输")
+
+                if let at = report.lastFlushAt {
+                    row("上次发送", Self.relative(at))
+                }
+                if let summary = report.lastFlushSummary {
+                    Text(summary)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("「当前可达 = 否」不代表坏了：传输走的是 transferUserInfo，"
+                     + "它交给系统排队、对端可用时投递，不需要手机此刻可达。")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+
             // ——— 4. 各指标采集量 ———
             Section("各指标采集量") {
                 if report.rows.isEmpty {
@@ -225,6 +255,28 @@ struct DiagnosticsView: View {
         }
         r.totalSamples = r.rows.reduce(0) { $0 + $1.count }
 
+        // ——— 传往 iPhone 的通道 ———
+        let link = WatchLinkSession.shared
+        r.linkSupported = link.isSupported
+        r.linkActivation = link.activationStateText
+        r.linkPaired = link.isPaired
+        r.companionInstalled = link.isCompanionAppInstalled
+        r.linkReachable = link.isReachable
+        r.outstandingTransfers = link.outstandingCount
+        r.outboxPending = (try? await services.store.pendingUploadCount()) ?? 0
+        r.pendingDeletions = await services.deletions.pendingCount()
+
+        let flushSnapshot = await services.outboxFlusher.snapshot()
+        r.lastFlushAt = flushSnapshot.lastFlushAt
+        // 注意变量名不要叫 report —— 那会遮蔽这个视图的 @State 属性
+        if let sent = flushSnapshot.report, sent.didSendAnything {
+            let tail = sent.stopReason.map { "（\($0)）" } ?? ""
+            r.lastFlushSummary = "上次交给系统：\(sent.batches) 批 / "
+                + "\(sent.samples) 条样本 / \(sent.deletions) 条删除\(tail)"
+        } else if let reason = flushSnapshot.report?.stopReason {
+            r.lastFlushSummary = "上次未发出：\(reason)"
+        }
+
         // HealthKit 直查
         r.probe = await HealthProbe.shared.runAll(heartRateHours: 6, days: 7)
 
@@ -284,6 +336,18 @@ struct DiagnosticsReport {
     var storeBytes: Int64 = 0
     var totalSamples = 0
     var rows: [MetricDiagnosticsRow] = []
+
+    // ——— 传往 iPhone 的通道 ———
+    var linkSupported = false
+    var linkActivation = "—"
+    var linkPaired = false
+    var companionInstalled = false
+    var linkReachable = false
+    var outstandingTransfers = 0
+    var outboxPending = 0
+    var pendingDeletions = 0
+    var lastFlushAt: Date?
+    var lastFlushSummary: String?
 
     var probe: HealthKitProbeReport?
 }

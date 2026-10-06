@@ -3,10 +3,25 @@
 <plist version="1.0">
 <dict>
 	<!--
-	  iOS 配套 app 的隐私清单。
-	  目前它只是一个占位界面（功能都在手表端），不使用任何 required reason API，
-	  也不收集数据，因此两个数组都为空。
-	  ⚠️ 将来 iPhone 端接入数据存储 / 上传后，这里必须如实更新。
+	  iOS app 的隐私清单。
+
+	  ## 为什么 NSPrivacyCollectedDataTypes 是空的（这是一个容易搞错的地方）
+	  Apple 对"收集（collect）"的定义是**把数据传出设备**：
+	  "data that your app collects and sends off the device"。
+	  本 app 收到的健康数据**全部只落在本机沙盒里**（SwiftData），
+	  不联网、不上传服务器、不共享给第三方，所以它不构成"收集"，
+	  这个数组保持为空是**正确的**，不是漏写。
+
+	  ⚠️ 一旦将来接上"上传到自己的服务器"，这里必须立刻如实填写
+	  健康与健身（Health & Fitness）类别，并同步更新隐私政策 ——
+	  那时不填就是虚假声明，会被 App Store 审核打回。
+
+	  ## 为什么 NSPrivacyAccessedAPITypes 也是空的
+	  本 target 没有使用任何 required reason API：
+	  · 不读 UserDefaults（手机端的状态都在内存里 / SwiftData 里）
+	  · 文件大小走 FileHandle.seekToEnd()，不是 FileManager.attributesOfItem
+	    （后者属于 FileTimestamp 类别，用了就必须在这里声明）
+	  ci/verify-project.sh 第 6 节会守住后面这一条。
 	-->
 	<key>NSPrivacyTracking</key>
 	<false/>

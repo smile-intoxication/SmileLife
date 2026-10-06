@@ -4,26 +4,30 @@ import HealthKit
 /// 指标注册表：**一个指标 = 一条声明**。
 ///
 /// 设计意图：同步引擎、本地库、快照、小组件全部只认 `MetricDescriptor`，
-/// 所以新增一个指标只需要在 `MetricCatalog.v1` 里加一行，全链路自动生效。
+/// 所以新增一个指标只需要在 `MetricCatalog.all` 里加一行，全链路自动生效。
 /// 不要为每个指标单独写逻辑——全量方案下那样会失控。
+///
+/// ## ⚠️ 展示字段（标题 / 单位 / SF Symbol / 小数位）**不在这个文件里**
+/// 它们全部来自 `MetricDisplay`（`shared/MetricDisplay.swift`），那是
+/// **跨设备共享的唯一定义处**：iPhone 也要用同一份，因为它收到的只有 `metricID`。
+/// 如果在这里再写一遍，新增指标时漏改一处**不会编译报错**，
+/// 表现是"手机上显示的指标名和手表上不一样"——这类漂移极难发现。
+/// `ci/verify-project.sh` 会断言两边的 id 集合一致。
 struct MetricDescriptor: Identifiable {
 
-    /// 数值形态：决定怎么从 HKSample 里取值和单位
+    /// 数值形态：决定怎么从 HKSample 里取值和单位。
+    ///
+    /// 注意这里**不带**小数位与中文标签——它们在 `MetricDisplay` 里，
+    /// 避免"同一个指标的小数位在两处不一致"。
     enum ValueShape {
-        /// 数值型，例如心率、血氧、HRV。带一个单位用于换算与展示。
-        case quantity(HKUnit, decimals: Int)
-        /// 枚举型，例如睡眠阶段。附带把枚举值翻译成中文标签的方法。
-        case category(label: (Int) -> String)
+        /// 数值型，例如心率、血氧、HRV。带一个单位用于换算。
+        case quantity(HKUnit)
+        /// 枚举型，例如睡眠阶段。标签翻译见 `MetricDisplay.categoryLabel`。
+        case category
     }
 
-    /// 稳定标识。**会被写进本地库、anchor 记录和快照文件，一旦上线不要改。**
+    /// 稳定标识。**会被写进本地库、anchor 记录、线协议和快照文件，一旦上线不要改。**
     let id: String
-    /// 展示名
-    let title: String
-    /// 单位后缀，用于 UI 展示（如 "bpm"、"ms"、"%"）
-    let unitSuffix: String
-    /// SF Symbol 名，小组件用
-    let symbolName: String
     /// HealthKit 样本类型
     let sampleType: HKSampleType
     /// 取值形态
@@ -40,10 +44,22 @@ struct MetricDescriptor: Identifiable {
     /// 📌 已确认的设计原则是「**不追求数据完整性**」——有的就收集，没有就算了。
     /// 所以这里的窗口**刻意取小**，不需要为了"尽量多拿历史"而放大它。
     /// 默认 7 天正好铺满本地保留窗口；心率因为密度高，单独设成 1 天。
+    ///
+    /// ⚠️ 必须是 `var` 而不是 `let`：`let` 带初值会被排除在成员初始化器之外，
+    /// 那样 `initialLookbackDays:` 就传不进来了（心率需要的正是这个）。
     var initialLookbackDays: Int = 7
+
+    // ——— 展示字段：全部转发到 MetricDisplay，这里不存副本 ———
+
+    var info: MetricDisplay.Info { MetricDisplay.infoOrFallback(id: id) }
+    var title: String { info.title }
+    var unitSuffix: String { info.unitSuffix }
+    var symbolName: String { info.symbolName }
+    /// 展示保留几位小数
+    var decimals: Int { info.decimals }
 }
 
-/// 存储策略：**本地只保留最近 7 天**（已确认）。
+/// 存储策略：**手表本地只保留最近 7 天**（已确认）。
 ///
 /// ## 为什么 7 天是安全的
 /// 最坏情况（S12 全天每 5 秒一条心率）：
@@ -51,10 +67,9 @@ struct MetricDescriptor: Identifiable {
 /// Apple Watch 完全放得下。而且**增量同步只拉新增样本**，
 /// 不会因为本地行数多而变慢——所以"行数多"本身不是问题。
 ///
-/// ## 为什么聚合层被删掉了
-/// 之前设计过"原始 24 小时 + 小时聚合 365 天"的分层，是为了**长期保留同时压缩体积**。
-/// 现在既然只留 7 天、不留长期，聚合就只剩额外复杂度（水位线、聚合顺序、
-/// 快照兜底），**收益为零**，所以整个拿掉。
+/// ## 长期档案在哪
+/// **在 iPhone 上**。手表是"采集器 + 7 天缓冲"，手机是"长期档案 + 图表"。
+/// 这正是手机端要有 15 分钟汇总桶的原因（原始样本会有几百万行，图表读不动）。
 ///
 /// ## 落到磁盘，不是内存
 /// SwiftData 库是**文件型**的（`isStoredInMemoryOnly: false`），
@@ -83,18 +98,17 @@ enum MetricCatalog {
         .literUnit(with: .milli)
         .unitDivided(by: HKUnit.gramUnit(with: .kilo).unitMultiplied(by: HKUnit.minute()))
 
-    /// 睡眠阶段的中文标签。注意 `.asleep` 已被 Apple 废弃，不要用。
+    private static let perMinute = HKUnit.count().unitDivided(by: .minute())
+
+    // MARK: - 睡眠标签
+
+    /// 睡眠阶段的中文标签。
+    ///
+    /// 实现**转调 `MetricDisplay`**，不自己写一份：iPhone 端渲染睡眠图表时
+    /// 需要同样的标签，而它拿不到 `HKCategoryValueSleepAnalysis`
+    /// （iOS app 不引入 HealthKit）。两处各写一份必然会漂移。
     static func sleepLabel(_ raw: Int) -> String {
-        guard let v = HKCategoryValueSleepAnalysis(rawValue: raw) else { return "未知" }
-        switch v {
-        case .inBed:               return "卧床"
-        case .awake:               return "清醒"
-        case .asleepCore:          return "核心睡眠"
-        case .asleepDeep:          return "深睡"
-        case .asleepREM:           return "快速眼动"
-        case .asleepUnspecified:   return "睡眠"
-        @unknown default:          return "未知"
-        }
+        MetricDisplay.categoryLabel(metricID: "sleep_analysis", raw: raw)
     }
 
     // MARK: - v1 指标清单
@@ -126,11 +140,8 @@ enum MetricCatalog {
         return [
             MetricDescriptor(
                 id: "hrv_rmssd",
-                title: "HRV (RMSSD)",
-                unitSuffix: "ms",
-                symbolName: "waveform.path.ecg.rectangle",
                 sampleType: rmssd,
-                shape: .quantity(HKUnit.secondUnit(with: .milli), decimals: 0),
+                shape: .quantity(HKUnit.secondUnit(with: .milli)),
                 enabledByDefault: true
             )
         ]
@@ -140,45 +151,34 @@ enum MetricCatalog {
     /// 注意：走路稳定性 / 步态不对称 / 步速 等**是 iPhone 产生的**，不放进手表端。
     ///
     /// 结构是 `[心率族] + [watchOS 27 专属] + [其余]`，
-    /// 拆成三段就是因为 `#if` 不能写在数组字面量里（见 `watchOS27Metrics`）。
+    /// 拆成三段是因为 watchOS 27 专属那段需要**运行时**判断类型是否存在，
+    /// 不能直接写在数组字面量里。
     static let all: [MetricDescriptor] =
         [
         // ——— 心率族（全部 ★Watch 独有）———
         MetricDescriptor(
             id: "heart_rate",
-            title: "心率",
-            unitSuffix: "bpm",
-            symbolName: "heart.fill",
             sampleType: q(.heartRate)!,
-            shape: .quantity(HKUnit.count().unitDivided(by: .minute()), decimals: 0),
+            shape: .quantity(perMinute),
             enabledByDefault: true,
             initialLookbackDays: 1   // 高频数据，首次只回看 1 天（不追求完整性）
         ),
         MetricDescriptor(
             id: "resting_heart_rate",
-            title: "静息心率",
-            unitSuffix: "bpm",
-            symbolName: "heart.text.square.fill",
             sampleType: q(.restingHeartRate)!,
-            shape: .quantity(HKUnit.count().unitDivided(by: .minute()), decimals: 0),
+            shape: .quantity(perMinute),
             enabledByDefault: true
         ),
         MetricDescriptor(
             id: "walking_heart_rate_average",
-            title: "步行心率",
-            unitSuffix: "bpm",
-            symbolName: "figure.walk",
             sampleType: q(.walkingHeartRateAverage)!,
-            shape: .quantity(HKUnit.count().unitDivided(by: .minute()), decimals: 0),
+            shape: .quantity(perMinute),
             enabledByDefault: true
         ),
         MetricDescriptor(
             id: "hrv_sdnn",
-            title: "HRV (SDNN)",
-            unitSuffix: "ms",
-            symbolName: "waveform.path.ecg",
             sampleType: q(.heartRateVariabilitySDNN)!,
-            shape: .quantity(HKUnit.secondUnit(with: .milli), decimals: 0),
+            shape: .quantity(HKUnit.secondUnit(with: .milli)),
             enabledByDefault: true
         )
         ]
@@ -187,69 +187,48 @@ enum MetricCatalog {
         // ——— 呼吸 / 血氧 / 腕温 ———
         MetricDescriptor(
             id: "respiratory_rate",
-            title: "呼吸频率",
-            unitSuffix: "次/分",
-            symbolName: "lungs.fill",
             sampleType: q(.respiratoryRate)!,
-            shape: .quantity(HKUnit.count().unitDivided(by: .minute()), decimals: 1),
+            shape: .quantity(perMinute),
             enabledByDefault: true
         ),
         MetricDescriptor(
             id: "oxygen_saturation",
-            title: "血氧",
-            unitSuffix: "%",
-            symbolName: "drop.fill",
             sampleType: q(.oxygenSaturation)!,
-            shape: .quantity(HKUnit.percent(), decimals: 0),
+            shape: .quantity(HKUnit.percent()),
             enabledByDefault: true
         ),
         MetricDescriptor(
             id: "sleeping_wrist_temperature",
-            title: "睡眠腕温",
-            unitSuffix: "°C",
-            symbolName: "thermometer.medium",
             sampleType: q(.appleSleepingWristTemperature)!,
-            shape: .quantity(HKUnit.degreeCelsius(), decimals: 2),
+            shape: .quantity(HKUnit.degreeCelsius()),
             enabledByDefault: true
         ),
 
         // ——— 睡眠（枚举型）———
         MetricDescriptor(
             id: "sleep_analysis",
-            title: "睡眠",
-            unitSuffix: "",
-            symbolName: "bed.double.fill",
             sampleType: c(.sleepAnalysis)!,
-            shape: .category(label: sleepLabel),
+            shape: .category,
             enabledByDefault: true
         ),
 
         // ——— 可选：默认关闭，用户可在设置里打开 ———
         MetricDescriptor(
             id: "active_energy",
-            title: "活动能量",
-            unitSuffix: "kcal",
-            symbolName: "flame.fill",
             sampleType: q(.activeEnergyBurned)!,
-            shape: .quantity(HKUnit.kilocalorie(), decimals: 1),
+            shape: .quantity(HKUnit.kilocalorie()),
             enabledByDefault: false
         ),
         MetricDescriptor(
             id: "exercise_time",
-            title: "锻炼时间",
-            unitSuffix: "分钟",
-            symbolName: "figure.run",
             sampleType: q(.appleExerciseTime)!,
-            shape: .quantity(HKUnit.minute(), decimals: 0),
+            shape: .quantity(HKUnit.minute()),
             enabledByDefault: false
         ),
         MetricDescriptor(
             id: "vo2_max",
-            title: "最大摄氧量",
-            unitSuffix: "mL/kg·min",
-            symbolName: "chart.line.uptrend.xyaxis",
             sampleType: q(.vo2Max)!,
-            shape: .quantity(vo2MaxUnit, decimals: 1),
+            shape: .quantity(vo2MaxUnit),
             enabledByDefault: false
         )
     ]

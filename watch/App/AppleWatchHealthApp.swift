@@ -20,6 +20,13 @@ struct AppleWatchHealthApp: App {
 final class AppDelegate: NSObject, WKApplicationDelegate {
 
     func applicationDidFinishLaunching() {
+        // ⚠️ 顺序很重要：**先**激活 WatchConnectivity 会话，**再**排后台刷新。
+        //    WCSession 未激活时 transferUserInfo 会静默失败 ——
+        //    那种"手机上一直接收不到数据、手表这边看不出问题"的状态最难查。
+        //    （activate 本身是异步的，激活完成后 WatchServices 里的回调
+        //      会把之前发不出去的队列补发一次。）
+        WatchServices.shared.startLink()
+
         BackgroundCoordinator.shared.scheduleNextRefresh()
     }
 

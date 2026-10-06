@@ -68,15 +68,16 @@ actor SnapshotService {
     /// 并不是用户想看的"昨晚睡了多久"。
     /// 正确的做法是另加一个聚合器（按睡眠会话求和 asleep* 时长），
     /// 这里先如实展示阶段标签，等 UI 需求明确后再替换。
+    /// （iPhone 端的睡眠图表就是那个聚合器，只是它算的是"每天各阶段总时长"。）
     private func format(record: SampleRecord, metric: MetricDescriptor) -> String {
         switch metric.shape {
-        case .quantity(_, let decimals):
+        case .quantity:
             guard let value = record.value else { return "—" }
-            return String(format: "%.\(decimals)f", value)
+            return String(format: "%.\(metric.decimals)f", value)
 
-        case .category(let label):
+        case .category:
             guard let raw = record.categoryValue else { return "—" }
-            return label(raw)
+            return MetricDisplay.categoryLabel(metricID: metric.id, raw: raw)
         }
     }
 }

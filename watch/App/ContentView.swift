@@ -11,6 +11,8 @@ struct ContentView: View {
     @State private var snapshot: LatestSnapshot = .empty
     @State private var status: SyncStatus = .unknown
     @State private var isSyncing = false
+    /// 还没交给 iPhone 的样本条数。0 表示队列已经发空。
+    @State private var pendingSends = 0
 
     // ⚠️ 这里**刻意没有** "未授权指标" 状态。
     // HealthKit 的读权限是不可查询的（详见 HealthAuthorizer 里的说明），
@@ -39,6 +41,13 @@ struct ContentView: View {
                             .foregroundStyle(.orange)
                             .lineLimit(2)
                     }
+                    // 如实告诉用户"还有多少没送到手机"。
+                    // 不发「同步完成」这种笼统的提示 —— 那样用户会以为手机上已经有了。
+                    Text(pendingSends == 0
+                         ? "数据已全部交给 iPhone"
+                         : "还有 \(pendingSends) 条待发送到 iPhone")
+                        .font(.caption2)
+                        .foregroundStyle(pendingSends == 0 ? .secondary : .orange)
                 }
 
                 // ——— 各指标最新值 ———
@@ -111,8 +120,13 @@ struct ContentView: View {
         isSyncing = true
         defer { isSyncing = false }
 
+        // 会话没激活就发不出去，而 activate 是幂等的 —— 这里再兜一次，
+        // 覆盖「App 是被后台唤醒启动、AppDelegate 还没跑完」这类时序。
+        WatchLinkSession.shared.activate()
+
         status = await WatchServices.shared.syncEngine.syncAll(reason: .foreground)
         snapshot = SharedStore.readSnapshot()
+        pendingSends = (try? await WatchServices.shared.store.pendingUploadCount()) ?? 0
 
         // 前台跑完顺便排一次后台，保证链路不断
         BackgroundCoordinator.shared.scheduleNextRefresh()

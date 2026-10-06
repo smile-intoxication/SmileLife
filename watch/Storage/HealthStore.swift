@@ -204,6 +204,42 @@ actor HealthStore {
         try modelContext.fetchCount(FetchDescriptor<PendingUploadRecord>())
     }
 
+    /// 取最老的一批待发送行，**解码成线上格式**后返回。
+    ///
+    /// ⚠️ 解码失败的行会被**就地删掉**，这一点很重要：
+    /// 它们在队首，每轮都会被取出来、每轮都解不开、如果只是跳过就永远删不掉，
+    /// 于是整个上传队列被几行坏数据**永久堵死**，而且没有任何报错。
+    /// 按「不追求完整性」的原则，直接丢弃并打日志才是对的。
+    func outboxBatch(limit: Int = 200) throws -> [OutboxRow] {
+        var descriptor = FetchDescriptor<PendingUploadRecord>(
+            sortBy: [SortDescriptor(\.createdAt, order: .forward)]
+        )
+        descriptor.fetchLimit = limit
+        let records = try modelContext.fetch(descriptor)
+        guard !records.isEmpty else { return [] }
+
+        var rows: [OutboxRow] = []
+        var broken: [UUID] = []
+        for record in records {
+            if let payload = UploadPayload.decode(record.payload) {
+                rows.append(OutboxRow(id: record.id,
+                                      payload: payload,
+                                      byteCount: record.payload.count))
+            } else {
+                broken.append(record.id)
+            }
+        }
+
+        if !broken.isEmpty {
+            print("[Outbox] ⚠️ 丢弃 \(broken.count) 行无法解码的队列条目（否则会永久堵住队列）")
+            try modelContext.delete(model: PendingUploadRecord.self,
+                                    where: #Predicate { broken.contains($0.id) })
+            try modelContext.save()
+        }
+
+        return rows
+    }
+
     func removeUploads(ids: [UUID]) throws {
         guard !ids.isEmpty else { return }
         try modelContext.delete(model: PendingUploadRecord.self, where: #Predicate { ids.contains($0.id) })

@@ -14,8 +14,23 @@ final class WatchServices {
     let snapshotService: SnapshotService
     let syncEngine: HealthSyncEngine
 
-    /// 预留：等确认上传目标后换成真实实现
-    let uploadTransport: UploadTransport = NoopUploadTransport()
+    /// 手表 → iPhone 的通道（WatchConnectivity）
+    let link = WatchLinkSession.shared
+
+    /// 待转发给 iPhone 的删除（用户在健康 App 里删掉的样本）
+    let deletions: DeletionQueue
+
+    /// 待上传队列的搬运工：把队列里的样本交给 iPhone
+    let outboxFlusher: OutboxFlusher
+
+    /// **服务端**直传路径，尚未接入。
+    ///
+    /// 保留 `UploadTransport` 这个协议是为了以后要把数据也送一份到自己的服务器时，
+    /// 实现一个 `HTTPTransport` 即可，**线上格式（`UploadPayload`）不用改**。
+    /// 「手表 → iPhone」那条路不走这个协议，它实现在 `OutboxFlusher` 里
+    /// （`transferUserInfo` 是"交给系统排队"的语义，和这里"给你一批、
+    /// 你给我一个 throw"的同步语义并不吻合）。
+    let serverUploadTransport: UploadTransport = NoopUploadTransport()
 
     /// 本地库落盘位置（诊断界面展示用）
     var storeURL: URL? { container.configurations.first?.url }
@@ -58,7 +73,45 @@ final class WatchServices {
 
         store = HealthStore(modelContainer: container)
         snapshotService = SnapshotService(store: store)
-        syncEngine = HealthSyncEngine(store: store, snapshotService: snapshotService)
+        deletions = DeletionQueue()
+        outboxFlusher = OutboxFlusher(store: store,
+                                      link: WatchLinkSession.shared,
+                                      deletions: deletions)
+        syncEngine = HealthSyncEngine(store: store,
+                                      snapshotService: snapshotService,
+                                      flusher: outboxFlusher,
+                                      deletions: deletions)
+    }
+
+    /// 启动「手表 → iPhone」通道。**必须在 app 启动最早的时候调用**
+    /// （`applicationDidFinishLaunching` 里）。
+    ///
+    /// 为什么不能等用户点开某个界面再调用：`WCSession` 未激活时
+    /// `transferUserInfo` 会**静默失败**，表现是"手机上一直接收不到数据"，
+    /// 而手表这边看不出任何异常。
+    ///
+    /// 这里同时挂上两个回调：
+    /// - `onTransferSettled`：一次传输送达后，说明系统队列腾出了位置，
+    ///   顺势把剩下的继续发出去（这就是背压的"解锁"时机）。
+    /// - `onActivationChanged`：会话刚激活时，把之前因为未激活而发不出去的补上。
+    func startLink() {
+        // ⚠️ 用 `[weak flusher]` 而不是强引用：`WatchLinkSession.shared` 会持有这两个闭包，
+        //    而 flusher 又持有 `WatchLinkSession.shared` —— 强引用会形成一个环。
+        //    这里虽然是"活到进程结束"的单例、成环不会泄漏出问题，
+        //    但成环会让"谁持有谁"彻底说不清，以后想改生命周期时会踩到。
+        WatchLinkSession.shared.onTransferSettled = { [weak outboxFlusher] _, error in
+            // 失败不重试：`transferUserInfo` 的失败几乎都是"对端 app 没装"这类
+            // 不会因为立刻重试而改变的原因。重试只会空转，把后台预算烧光。
+            guard error == nil, let outboxFlusher else { return }
+            Task { await outboxFlusher.flush(budget: 5) }
+        }
+
+        WatchLinkSession.shared.onActivationChanged = { [weak outboxFlusher] in
+            guard let outboxFlusher else { return }
+            Task { await outboxFlusher.flush(budget: 5) }
+        }
+
+        WatchLinkSession.shared.activate()
     }
 
     /// 本地库自愈：删掉旧 store 重建一次；仍然失败就退化成**内存库**。

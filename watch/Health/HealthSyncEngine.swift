@@ -28,18 +28,25 @@ actor HealthSyncEngine {
     private let healthStore = HKHealthStore()
     private let store: HealthStore
     private let snapshotService: SnapshotService
+    private let flusher: OutboxFlusher
+    private let deletions: DeletionQueue
 
     /// 防止前台同步和后台唤醒撞在一起
     private var isRunning = false
 
-    init(store: HealthStore, snapshotService: SnapshotService) {
+    init(store: HealthStore,
+         snapshotService: SnapshotService,
+         flusher: OutboxFlusher,
+         deletions: DeletionQueue) {
         self.store = store
         self.snapshotService = snapshotService
+        self.flusher = flusher
+        self.deletions = deletions
     }
 
     // MARK: - 对外入口
 
-    /// 跑一轮同步：拉增量 → 落库 → 重建快照 → （预留）入上传队列。
+    /// 跑一轮同步：拉增量 → 落库 → 重建快照 → 清理 → 把数据交给 iPhone。
     @discardableResult
     func syncAll(reason: Reason) async -> SyncStatus {
         guard !isRunning else { return SharedStore.readStatus() }
@@ -63,7 +70,12 @@ actor HealthSyncEngine {
                 break
             }
             do {
-                try await syncOne(metric, deadline: deadline)
+                // ⚠️ 删除也要转发给 iPhone：手表本地删了、手机不删，
+                //    手机上就会一直显示用户已经删掉的数据（正确性问题）。
+                let deleted = try await syncOne(metric, deadline: deadline)
+                if !deleted.isEmpty {
+                    await deletions.append(deleted)
+                }
                 succeededMetrics += 1
             } catch {
                 // 单个指标失败不影响其它指标。锁屏读不到是最常见的原因。
@@ -77,13 +89,30 @@ actor HealthSyncEngine {
 
         // ——— 保留策略：只留最近 7 天 ———
         // 有 #Index 撑着，这条删除不会全表扫描。
+        //
+        // ⚠️ 这里删掉的样本**刻意不转发给 iPhone**。
+        //    两者是不同的东西：
+        //      · `HKDeletedObject`（上面的 deletions）= 用户主动删掉了数据 → 手机必须跟着删
+        //      · 这里的保留清理 = 手表磁盘放不下 → 手机是长期档案，本来就该留着
+        //    把保留清理也转发出去，会变成"手机上永远只有 7 天数据"，
+        //    那正是做手机端图表要解决的问题。
         if let removed = try? await store.enforceRetention(), removed > 0 {
-            print("[Retention] 清理了 \(removed) 条超过 \(StoragePolicy.retentionDays) 天的样本")
+            print("[Retention] 清理了 \(removed) 条超过 \(StoragePolicy.retentionDays) 天的样本（手机端档案不受影响）")
         }
         // 上传队列也设上限：按"不追求完整性"原则，满了丢最老的即可。
-        // 但要**记下丢了多少** —— 上传还是 Noop，丢掉的都是"从没被尝试过"的条目。
+        // ⚠️ 现在队列**真的会被消费**了（由 OutboxFlusher 发往 iPhone），
+        //    所以只在 iPhone 长期不可达时才会触发这个丢弃，丢的条数会被记进日志。
         if let dropped = try? await store.trimUploadQueue(), dropped > 0 {
             print("[Upload] 队列满，丢弃最老 \(dropped) 条")
+        }
+
+        // ——— 把手表采到的数据交给 iPhone ———
+        // 刻意放在**最后**：同步的重点是"先把数据落到自己的库里"（落库即安全），
+        // 发送只花剩余预算，发不完的留在队列里等下一轮，或者等 didFinish 腾出位置。
+        let flushReport = await flusher.flush(budget: reason == .background ? 3 : 20)
+        if let stop = flushReport.stopReason, !flushReport.stopIsNormal {
+            // 只有"真的坏了"才写进错误展示；"系统队列未腾空"是正常背压，不该变红。
+            roundErrors.append("发送到手机：\(stop)")
         }
 
         // ⚠️ 只有真的成功跑完至少一个指标才更新 lastSuccessAt。
@@ -110,7 +139,13 @@ actor HealthSyncEngine {
     /// 30 页 x 2000 条 = 单轮最多 6 万条，足够覆盖首次同步，也不会无限跑。
     private static let maxPagesPerMetric = 30
 
-    private func syncOne(_ metric: MetricDescriptor, deadline: Date) async throws {
+    /// 同步单个指标。
+    ///
+    /// - Returns: 本轮被 HealthKit 通知**删除**的样本 uuid。
+    ///   调用方要把它们转发给 iPhone —— 手表本地删了、手机不删，
+    ///   手机上就会一直显示用户已经删掉的数据。
+    @discardableResult
+    private func syncOne(_ metric: MetricDescriptor, deadline: Date) async throws -> [UUID] {
         // ⚠️ 游标损坏时不要让它把这个指标永久卡死：清掉坏游标、按首次同步重来。
         //    （锚点是 NSSecureCoding 存档，跨版本/损坏时会解档失败；
         //      不处理的话每一轮都在第一行以同样方式失败，而且 lastError 只有单字段，
@@ -136,6 +171,7 @@ actor HealthSyncEngine {
         }
 
         var totalNew = 0
+        var deletedUUIDs: [UUID] = []
         var shouldContinue = true
         var page = 0
 
@@ -156,7 +192,10 @@ actor HealthSyncEngine {
 
             let records = result.samples.compactMap { makeRecord($0, metric: metric) }
             try await store.upsert(records)
-            try await store.delete(uuids: result.deleted.map(\.uuid))
+            // 收集删除 uuid：本地删掉的同时也要转发给 iPhone（正确性，不是完整性）
+            let deleted = result.deleted.map(\.uuid)
+            try await store.delete(uuids: deleted)
+            deletedUUIDs.append(contentsOf: deleted)
             totalNew += records.count
 
             // 保存游标 —— 即使后面还有页，也要先落盘，
@@ -201,6 +240,7 @@ actor HealthSyncEngine {
         if totalNew > 0 {
             print("[Sync] \(metric.id)：新增 \(totalNew) 条")
         }
+        return deletedUUIDs
     }
 
     // MARK: - Anchored query 的 async 包装
@@ -252,7 +292,7 @@ actor HealthSyncEngine {
         )
 
         switch metric.shape {
-        case .quantity(let unit, _):
+        case .quantity(let unit):
             guard let q = sample as? HKQuantitySample else { return nil }
             record.value = q.quantity.doubleValue(for: unit)
             record.unitString = unit.unitString

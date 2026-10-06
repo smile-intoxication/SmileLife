@@ -32,7 +32,7 @@ settings:
 targets:
 
   # ============================================================
-  # iOS 配套 App（极简，只为承载 watch app 的打包与分发）
+  # iOS 配套 App
   # ============================================================
   AppleWatchHealth:
     type: application
@@ -41,6 +41,14 @@ targets:
       - path: ios
         excludes:
           - PrivacyInfo.xcprivacy
+      # ★ 跨设备共享代码（仓库根的 `shared/`）。
+      #   注意它和下面的 `watch/Shared` 是**两个不同的东西**，别混：
+      #     · shared/       = 手表 ↔ iPhone 之间共享（指标元数据、传输协议）
+      #     · watch/Shared  = 手表 app ↔ 表盘小组件之间共享（App Group 快照）
+      #   两者都必须**只依赖 Foundation**，自检脚本第 11 节会守住这条。
+      #   iOS app 拿它来把 metricID 翻成标题/单位/小数位
+      #   —— 因为线上只传 metricID，不传展示字段。
+      - path: shared
       # 隐私清单必须显式作为**资源**拷进 bundle 根目录
       - path: ios/PrivacyInfo.xcprivacy
         buildPhase: resources
@@ -95,6 +103,10 @@ targets:
       - path: watch/Storage
       - path: watch/Shared
       - path: watch/Upload
+      # ★ 跨设备共享代码：指标展示元数据（MetricDisplay）+ 传输协议
+      #   （UploadPayload / SampleBatch）。和 iPhone 端编的是同一份源码，
+      #   这样"手表发的"和"手机解的"不可能对不上。
+      - path: shared
       # App 图标 asset catalog（只放一张 1024x1024，actool 自动派生全部尺寸）。
       # 由 `python ci/make-app-icon.py` 生成，可复现、可 review。
       - path: watch/Assets.xcassets

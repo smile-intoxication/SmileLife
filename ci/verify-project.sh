@@ -321,6 +321,178 @@ else
   ok "没有引用 watchOS 27 专属的 Swift 符号"
 fi
 
+# ---------- 11. 跨设备共享代码的边界 ----------
+# 仓库根有一个 `shared/`（手表 ↔ iPhone 共享），watch 下还有一个 `watch/Shared`
+# （手表 app ↔ 小组件共享）。两者都只能依赖 Foundation，但**原因不同**：
+#   · shared/      会被编进 iOS app —— 而 iOS app **刻意不申请健康权限**
+#   · watch/Shared 会被编进小组件 —— 小组件**不该有 HealthKit 访问**
+# 一旦有人在里面 import HealthKit，编译**照样通过**，但产品含义就变了
+# （iOS app 被迫带上健康权限、小组件可能被系统判定为需要授权而白屏）。
+section "11. 跨设备共享代码的边界"
+NSHARED=$(grep -c -- '- path: shared' project.yml)
+if [ "$NSHARED" -ge 2 ]; then
+  ok "shared/ 已接进 iOS 与 watch 两个 target（$NSHARED 处）"
+else
+  bad "project.yml 只引用了 shared/ $NSHARED 次（应 ≥2：iOS + watch）。少接一个 target 会报 cannot find type in scope"
+fi
+
+for f in shared/MetricDisplay.swift shared/WatchWire.swift; do
+  if [ -f "$f" ]; then ok "$f 存在"; else bad "缺少 $f"; fi
+done
+
+BANNED_RE='^[[:space:]]*import[[:space:]]+(HealthKit|SwiftData|WatchConnectivity|WidgetKit|SwiftUI)'
+for f in shared/*.swift; do
+  [ -e "$f" ] || continue
+  if code_only "$f" | grep -qE "$BANNED_RE"; then
+    bad "$f 引入了被禁止的框架（shared/ 会编进 iOS app 与 watch app，只能依赖 Foundation）"
+  else
+    ok "$f 只依赖 Foundation"
+  fi
+done
+
+for f in watch/Shared/*.swift; do
+  [ -e "$f" ] || continue
+  if code_only "$f" | grep -qE "$BANNED_RE"; then
+    bad "$f 引入了被禁止的框架（watch/Shared 会编进小组件，小组件不该碰 HealthKit）"
+  else
+    ok "$f 只依赖 Foundation"
+  fi
+done
+
+# ⚠️ iOS app **刻意不引入 HealthKit**：它的数据全部来自手表传输。
+#    直接读手机上的 HealthKit 是另一条路（数据也在，但包含 iPhone 自己产生的部分），
+#    真要改成果条路，必须同时补 Info.plist 的用途说明与门户里的 HealthKit 能力，
+#    不能只是随手 import 一下。
+if grep -rqE '^[[:space:]]*import[[:space:]]+HealthKit' ios --include='*.swift'; then
+  bad "ios/ 里出现了 import HealthKit —— iOS app 的数据应全部来自手表传输；要改直读必须先补 Info.plist 用途说明与 HealthKit 能力"
+else
+  ok "iOS app 没有引入 HealthKit（数据只来自手表传输）"
+fi
+
+# ---------- 12. 指标 id 在两边必须一致 ----------
+# 线上只传 metricID（不传标题/单位）。所以 iPhone 必须自己有一份
+# `metricID -> 展示信息` 的表。两边 id 集合不一致时：
+#   · MetricDisplay 少一个 → 手机上是 `heart_rate` 这样的原始 id（难看但能看出来）
+#   · MetricCatalog  少一个 → 手表永远不采集它（手机上永远空着，**完全看不出来**）
+# 两种都不会编译报错，所以只能在这里守。
+section "12. 指标 id 一致性（MetricCatalog ↔ MetricDisplay）"
+DISPLAY_IDS=$(grep -oE 'id: "[A-Za-z0-9_]+"' shared/MetricDisplay.swift 2>/dev/null \
+              | sed -e 's/id: "//' -e 's/"//' | sort -u)
+CATALOG_IDS=$(grep -oE 'id: "[A-Za-z0-9_]+"' watch/Health/MetricCatalog.swift 2>/dev/null \
+              | sed -e 's/id: "//' -e 's/"//' | sort -u)
+
+printf '       MetricDisplay : %s\n' "$(printf '%s' "$DISPLAY_IDS" | tr '\n' ' ')"
+printf '       MetricCatalog : %s\n' "$(printf '%s' "$CATALOG_IDS" | tr '\n' ' ')"
+
+if [ -z "$DISPLAY_IDS" ] || [ -z "$CATALOG_IDS" ]; then
+  bad "有一边的指标 id 一个都没提取到（提取逻辑失效了，这一节等于没检查）"
+elif [ "$DISPLAY_IDS" = "$CATALOG_IDS" ]; then
+  ok "两边 id 集合完全一致（$(printf '%s\n' "$DISPLAY_IDS" | grep -c .) 个指标）"
+else
+  bad "两边的指标 id 集合不一致："
+  ONLY_DISPLAY=$(comm -23 <(printf '%s\n' "$DISPLAY_IDS") <(printf '%s\n' "$CATALOG_IDS") | tr '\n' ' ')
+  ONLY_CATALOG=$(comm -13 <(printf '%s\n' "$DISPLAY_IDS") <(printf '%s\n' "$CATALOG_IDS") | tr '\n' ' ')
+  printf '         只在 MetricDisplay 里（手表不会采集）：%s\n' "${ONLY_DISPLAY:-（无）}"
+  printf '         只在 MetricCatalog 里（手机上没名字）：%s\n' "${ONLY_CATALOG:-（无）}"
+fi
+
+# 重复 id：MetricDisplay 的索引是循环覆盖的（刻意不 trap），
+# 所以重复不会崩，只会"后者胜出"—— 同样必须在这里拦。
+DUP=$(grep -oE 'id: "[A-Za-z0-9_]+"' shared/MetricDisplay.swift 2>/dev/null \
+      | sed -e 's/id: "//' -e 's/"//' | sort | uniq -d | tr '\n' ' ')
+if [ -n "$DUP" ]; then
+  bad "MetricDisplay 里有重复的指标 id：$DUP"
+else
+  ok "MetricDisplay 里没有重复 id"
+fi
+
+# ---------- 13. WatchConnectivity 接线 ----------
+# 「手机上一直没数据」有五六种原因，而它们**在界面上长得一模一样**。
+# 下面这些断言守的是其中最隐蔽的几类 —— 编译全过、运行也不崩，就是没数据。
+section "13. WatchConnectivity 接线"
+for f in watch/Upload/WatchLinkSession.swift watch/Upload/OutboxFlusher.swift shared/WatchWire.swift \
+         ios/WatchLink.swift ios/PhoneStore.swift ios/PhoneModels.swift; do
+  if [ -f "$f" ]; then ok "$f 存在"; else bad "缺少 $f"; fi
+done
+
+# 大批量数据必须走 transferUserInfo（不需要对端可达），**不能**用 sendMessage
+# （它要求 isReachable，而 iPhone 在后台几乎永远不可达 → 每次同步都白跑）。
+if code_only watch/Upload/WatchLinkSession.swift | grep -q 'transferUserInfo'; then
+  ok "手表端用 transferUserInfo 投递（不需要对端可达）"
+else
+  bad "手表端没有用 transferUserInfo —— sendMessage 要求对端可达，后台同步会大面积失败"
+fi
+# ⚠️ 必须先**逐文件去掉注释**再判断 —— 解释"为什么不能用 sendMessage"的
+#    注释自己就会命中（和 attributesOfItem 那个守卫是同一个坑）。
+SENDMSG_HIT=$(for f in $(grep -rl 'sendMessage' watch ios shared --include='*.swift' 2>/dev/null); do
+                code_only "$f"
+              done | grep -c 'sendMessage')
+if [ "$SENDMSG_HIT" -gt 0 ]; then
+  bad "代码里出现了 sendMessage —— 它要求对端可达，而手表后台时 iPhone 几乎永远不可达，会静默丢数据"
+else
+  ok "没有用 sendMessage 做批量传输（只用 transferUserInfo）"
+fi
+
+# 两端都必须在**启动早期**激活会话。晚了会静默失败：
+# 手表在后台把数据传过来时，手机上的 app 可能从没被打开过，
+# 那种情况下任何 SwiftUI 视图都不会被创建 —— 在视图的 .task 里激活正好错过。
+if grep -q 'WatchServices.shared.startLink()' watch/App/AppleWatchHealthApp.swift 2>/dev/null; then
+  ok "手表在 applicationDidFinishLaunching 里激活会话"
+else
+  bad "手表没有在启动早期调用 WatchServices.shared.startLink()"
+fi
+if grep -q 'PhoneServices.shared.startLink()' ios/AppleWatchHealthIOSApp.swift 2>/dev/null; then
+  ok "iPhone 在 didFinishLaunchingWithOptions 里激活会话"
+else
+  bad "iPhone 没有在启动早期调用 PhoneServices.shared.startLink()（只放在视图里会错过后台投递）"
+fi
+if grep -q 'didFinishLaunchingWithOptions' ios/AppleWatchHealthIOSApp.swift 2>/dev/null; then
+  ok "iPhone 用了 UIApplicationDelegateAdaptor（SwiftUI App 没有 didFinishLaunching）"
+else
+  bad "iPhone 没有 UIApplicationDelegateAdaptor —— SwiftUI 的 App 里拿不到 didFinishLaunching"
+fi
+
+# 换手表（配对切换）时必须重新 activate，否则新表的数据**永远收不到**，
+# 而界面上一切正常（旧的会话说自己还是 activated）。
+if code_only ios/WatchLink.swift | grep -q 'sessionDidDeactivate'; then
+  if code_only ios/WatchLink.swift | sed -n '/sessionDidDeactivate/,/^    }/p' | grep -q 'activate()'; then
+    ok "sessionDidDeactivate 里重新激活了会话（换手表后还能收到数据）"
+  else
+    bad "sessionDidDeactivate 里没有重新 activate() —— 用户换手表后新表数据永远收不到"
+  fi
+else
+  bad "ios/WatchLink.swift 没有实现 sessionDidDeactivate"
+fi
+
+# 幂等去重是「至少一次投递」能成立的前提：手表可能重发，手机必须天然幂等。
+# 去掉 .unique 不会编译报错，但表现是"重发一次就多一条重复数据"。
+if grep -q '@Attribute(.unique) var uuid: UUID' ios/PhoneModels.swift 2>/dev/null; then
+  ok "PhoneSample 的 uuid 是唯一键（重复投递会变成更新而不是插入）"
+else
+  bad "PhoneSample 的 uuid 不是 @Attribute(.unique) —— 重发会产生重复数据"
+fi
+if grep -q '@Attribute(.unique) var key: String' ios/PhoneModels.swift 2>/dev/null; then
+  ok "PhoneRollup 的合成键是唯一键"
+else
+  bad "PhoneRollup 的 key 不是 @Attribute(.unique) —— 同一时间桶会出现多行"
+fi
+
+# 索引去掉不会编译报错，只会让"切时间范围"退化成全表扫描。
+# 手机上是几十万行，差别是"秒开"和"卡住"。
+if grep -q '#Index<PhoneSample>' ios/PhoneModels.swift 2>/dev/null; then
+  ok "PhoneSample 声明了 #Index（图表按时间段查询全靠它）"
+else
+  bad "PhoneSample 没有 #Index —— 图表的按时间段查询会全表扫描"
+fi
+
+# 协议版本必须先检查再解码：手表比手机新时应当**明确报错**，
+# 而不是把解不出来的负载当成"一批空数据"（那会表现成"就是没数据"）。
+if code_only ios/WatchLink.swift | grep -q 'currentVersion'; then
+  ok "iPhone 端先校验协议版本再解码"
+else
+  bad "iPhone 端没有校验 SampleBatch.currentVersion —— 版本不匹配时会静默丢数据"
+fi
+
 # ---------- 汇总 ----------
 printf '\n== 汇总：%d 通过，%d 失败\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
