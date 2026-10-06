@@ -81,6 +81,29 @@ init(heartbeatSeries:dataHandler: (HKHeartbeatSeriesQuery, TimeInterval, Bool, B
 
 > ⚠️ 这是社区记录，不是 Apple 文档。**必须真机验证**（见 §1.6）。
 
+#### 📌 实测记录（2026-10-07，本机，watchOS 27 / Series 12）
+
+| 条件 | 结果 |
+|---|---|
+| **房颤历史（AFib History）未开启** | 近 7 天 **0 条**心跳序列（手表「诊断」→ HealthKit 直查） |
+
+**这条 0 本身是有价值的证据**：它说明在本机、这 7 天里，
+**没有开启房颤历史时，Apple Watch 不会把逐拍序列写进 HealthKit**。
+
+也就是说上面那条社区证据的真正关键词是 **"in AF mode"** ——
+**"戴着手表就默认有逐拍数据"是不成立的**，需要用户先开启房颤历史。
+
+⚠️ 但**不要把这条 0 当成"永远没有"**：它是"房颤历史关闭"这个条件下的结果。
+真正的判据是**开启之后**再过夜佩戴复测 —— 这一步尚未完成。
+
+**顺带澄清一个必须分清的边界**（这是本问题最容易混的地方）：
+
+| | 房颤历史（被动后台） | 移动心电图 ECG（主动） |
+|---|---|---|
+| 用户要不要操作 | **不要**，戴着就行 | **要**：打开 App、手指按住表冠 30 秒 |
+| 会不会产生心跳序列 | 预期会（待验证） | 每次测量会产生一条 |
+| 结论 | ← **我们要的是这条** | 按需求方标准已排除 |
+
 ### 1.4 ECG 路径能补什么
 
 `HKElectrocardiogram` 官方原文：
@@ -171,7 +194,7 @@ init(heartbeatSeries:dataHandler: (HKHeartbeatSeriesQuery, TimeInterval, Bool, B
 | `heartRateVariabilitySDNN` | ✅ 已收 | 默认 4 小时；开不齐律通知 → 2 小时；AFib History → 15 分钟 |
 | 🆕 `heartRateVariabilityRMSSD` | ✅ 已收（**运行时探测**） | watchOS 27 新增；**官方页面无正文，是否自动写入未知** |
 | `heartRateRecoveryOneMinute` | ⬜ 未收 | 每次运动结束 1 条 |
-| `HKHeartbeatSeriesSample` | ⬜ 未收（探测中） | **逐拍时间戳 → 唯一的自动 RR 间期来源**；触发条件官方未写，见 §1.3 |
+| `HKHeartbeatSeriesSample` | ⬜ 未收（探测中） | **逐拍时间戳 → 唯一的自动 RR 间期来源**；触发条件官方未写，见 §1.3。**实测：房颤历史关闭时 0 条；开启后待复测** |
 | `HKElectrocardiogram` | ⬜ 未收 | **用户主动测量**，30 秒/次，可自行算 RR |
 | `atrialFibrillationBurden` | ⬜ 未收 | 每周 1 条；Watch 采集、**iPhone 计算** |
 | `lowHeartRateEvent` / `highHeartRateEvent` | ⬜ 未收 | 事件驱动，阈值在 metadata |
