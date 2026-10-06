@@ -30,6 +30,66 @@ enum MetricDisplay {
         case category
     }
 
+    /// 图表形态：**每个体征用适合它自己的图**，不是一律折线。
+    ///
+    /// ## 判断依据是「数据是**怎么产生的**」，不是「好不好看」
+    /// 这条区分非常实际 —— 用错图会让图**说谎**：
+    /// - 血氧是一天几次的**点测**，画成折线就把"中间那几小时没测"伪装成了连续变化；
+    /// - 活动能量是**日累计量**，画成平均值折线等于把"今天走了多少"变成"平均每分钟多少"，
+    ///   用户根本对不上自己的活动圆环；
+    /// - 心率是唯一真正**连续高频**的（S12 最坏每 5 秒一条），折线 + 波动带才是它该有的样子。
+    enum ChartStyle: String, Codable, Sendable {
+        /// 高频连续量：平均值折线 + 最低~最高波动带
+        case lineWithRange
+        /// 稀疏**趋势**量：点 + 折线。这类量的相邻测量之间有真实的生理连续性，连线是有意义的
+        case line
+        /// **离散点测**量：只画点，**不连线**。连线会把"没测的时段"伪装成平滑过渡
+        case points
+        /// **日累计**量：柱状。看的是"这段时间一共多少"，不是"平均多少"
+        case bars
+        /// 枚举型（睡眠阶段）：按标签堆叠柱
+        case stackedBars
+    }
+
+    /// 每个指标**显式**声明自己的图表形态。
+    ///
+    /// ⚠️ 用一张表而不是在 `all` 的 12 个条目里各加一行：这里能一眼看全
+    /// "谁用了哪种图"，调整时不用在 200 行里翻。**但绝不能只靠 `default` 兜底** ——
+    /// 漏掉一个指标会静默变回折线图，没有任何报错。
+    /// `ci/verify-project.sh` 第 12 节会断言"每个指标 id 在这张表里都出现过"。
+    private static let chartStyles: [String: ChartStyle] = [
+        // 唯一真正连续高频的指标
+        "heart_rate": .lineWithRange,
+
+        // 稀疏但**有真实连续性**的趋势量：静息心率、步行心率、最大摄氧量
+        "resting_heart_rate": .line,
+        "walking_heart_rate_average": .line,
+        "vo2_max": .line,
+
+        // 离散点测：每次是一个独立读数，之间没有可连的连续变化
+        "hrv_sdnn": .points,
+        "hrv_rmssd": .points,
+        "respiratory_rate": .points,
+        "oxygen_saturation": .points,
+        "sleeping_wrist_temperature": .points,
+
+        // 日累计量
+        "active_energy": .bars,
+        "exercise_time": .bars,
+
+        // 枚举型
+        "sleep_analysis": .stackedBars
+    ]
+
+    /// 取某个指标的图表形态。
+    ///
+    /// ⚠️ 兜底值是 `.line`，但**兜底不该被依赖**：真走到兜底说明
+    /// `chartStyles` 漏了一条，而表现只是"某个体征又变成折线图了"，
+    /// 完全看不出是配置漏了。自检脚本第 12 节会拦下这种情况。
+    static func chartStyle(id: String) -> ChartStyle {
+        chartStyles[id] ?? .line
+    }
+
     struct Info: Identifiable, Equatable, Sendable {
         /// 稳定标识。**会被写进线协议与历史数据，一旦上线不要改。**
         let id: String
@@ -48,6 +108,9 @@ enum MetricDisplay {
         /// 0~120 的坐标轴会把曲线压成一条直线，什么都看不出来。
         /// 而"活动能量 / 锻炼时间"这类累积量从 0 开始才符合直觉。
         let chartFromZero: Bool
+
+        /// 图表形态（由 `MetricDisplay.chartStyles` 决定，不在这里存副本）
+        var chartStyle: ChartStyle { MetricDisplay.chartStyle(id: id) }
 
         /// `metricID` 在对方版本里不存在时的兜底。
         ///

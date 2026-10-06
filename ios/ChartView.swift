@@ -17,6 +17,10 @@ struct ChartView: View {
     @State private var range: ChartRange = .week
 
     @State private var points: [ChartPoint] = []
+    /// 柱状图的数据（日累计量用）。和 `points` 是**互斥**的两套：
+    /// 同一个指标要么是"值随时间变化"，要么是"每段时间累计多少"，不会两者都是。
+    @State private var bars: [BarPoint] = []
+    @State private var barStats: BarStats?
     @State private var sleepDays: [SleepDayBar] = []
     /// 拍平后的睡眠片段（`Chart` 直接吃这个，不现算 —— 见 `SleepChartSegment` 的注释）
     @State private var sleepSegments: [SleepChartSegment] = []
@@ -170,33 +174,76 @@ struct ChartView: View {
 
     @ViewBuilder
     private var quantityContent: some View {
-        if points.isEmpty {
+        if points.isEmpty && bars.isEmpty {
             if isLoading || !hasLoadedOnce {
                 loadingPlaceholder
             } else {
                 emptyPlaceholder
             }
         } else {
-            Chart(points) { point in
-                // 先画"最低~最高"的浅色带，再画平均值折线。
-                // 只有平均值的话，一次剧烈波动会被平均掉、完全看不见。
-                AreaMark(x: .value("时间", point.date),
-                         yStart: .value("最低", point.minValue),
-                         yEnd: .value("最高", point.maxValue))
-                    .foregroundStyle(Color.pink.opacity(0.15))
+            chartForStyle
 
-                LineMark(x: .value("时间", point.date),
-                         y: .value("平均", point.average))
-                    .foregroundStyle(Color.pink)
-                    .interpolationMethod(.catmullRom)
-            }
-            .chartYScale(domain: ChartSeriesBuilder.yDomain(from: points,
-                                                            fromZero: info.chartFromZero))
-            .frame(height: 260)
-
-            if let stats {
+            // 统计量也要跟着形态走：累计量看的是"一共多少 / 日均多少"，
+            // 用平均值那一套会给出一个和活动圆环完全对不上的数字。
+            if info.chartStyle == .bars {
+                if let barStats { barStatisticsRow(barStats) }
+            } else if let stats {
                 statisticsRow(stats)
             }
+        }
+    }
+
+    /// **按体征选图**。判断依据是数据是"怎么产生的"，见 `MetricDisplay.ChartStyle`。
+    @ViewBuilder
+    private var chartForStyle: some View {
+        switch info.chartStyle {
+        case .bars:
+            CumulativeBarChart(bars: bars,
+                               unit: range.barBucket >= 24 * 3600 - 1 ? .day : .hour,
+                               tint: tintColor)
+        case .points:
+            ScatterPointChart(points: points, domain: yDomain, tint: tintColor)
+        case .lineWithRange:
+            RangeBandChart(points: points, domain: yDomain)
+        case .line:
+            TrendLineChart(points: points, domain: yDomain, tint: tintColor)
+        case .stackedBars:
+            // 枚举型走 `sleepContent`，不会到这里。留着分支是为了让 switch 完整 —— 
+            // 真走到了说明 `kind` 判断和 `chartStyle` 打架了，画个趋势线兜底总比崩好。
+            TrendLineChart(points: points, domain: yDomain, tint: tintColor)
+        }
+    }
+
+    private var yDomain: ClosedRange<Double> {
+        ChartSeriesBuilder.yDomain(from: points, fromZero: info.chartFromZero)
+    }
+
+    /// 图线颜色按**图表形态**分，不按指标分。
+    /// 好处是同一个颜色的图读法一样（点图就是点测、柱图就是累计），
+    /// 换指标时不用重新理解这张图。
+    private var tintColor: Color {
+        switch info.chartStyle {
+        case .lineWithRange: return .pink
+        case .line:          return .orange
+        case .points:        return .teal
+        case .bars:          return .green
+        case .stackedBars:   return .indigo
+        }
+    }
+
+    private var barAverageLabel: String {
+        range.barBucket >= 24 * 3600 - 1 ? "日均" : "时均"
+    }
+
+    private var barBucketDescription: String {
+        range.barBucket >= 24 * 3600 - 1 ? "一天" : "一小时"
+    }
+
+    private func barStatisticsRow(_ stats: BarStats) -> some View {
+        HStack(spacing: 10) {
+            statistic("合计", value: stats.total)
+            statistic(barAverageLabel, value: stats.perBar)
+            statistic("最高", value: stats.peak)
         }
     }
 
@@ -430,12 +477,31 @@ struct ChartView: View {
             : "\(Int(range.displayBucket / 60)) 分钟"
     }
 
+    /// 一句话解释"这张图是怎么画出来的"。
+    ///
+    /// 这不是装饰：不同形态的图**读法完全不同**（点图为什么不连线、柱图是累计不是平均），
+    /// 不写清楚，用户会拿折线的直觉去读柱状图，然后得出错误结论。
+    private var chartNote: String {
+        switch info.chartStyle {
+        case .lineWithRange:
+            return "折线是每 \(bucketDescription)一格的平均值，浅色带是该格内的最低~最高值。"
+        case .line:
+            return "每 \(bucketDescription)一个点并连成线：这类指标的相邻测量之间有真实的生理连续性。"
+        case .points:
+            return "只画点、不连线：这是离散点测（一天测几次），中间没测的时段不能画成平滑过渡。每点是一格内的实测值。"
+        case .bars:
+            return "柱高是每\(barBucketDescription)的累计值，不是平均值 —— 这个指标看的是一共多少。"
+        case .stackedBars:
+            return ""
+        }
+    }
+
     private var provenanceNote: some View {
         VStack(alignment: .leading, spacing: 4) {
             // 用 `kind` 而不是 `info.kind`：RR 间期在 MetricDisplay 里查不到
             // （它不是 HealthKit 指标），读 info 只会拿到 fallback。
-            if kind == .quantity, !points.isEmpty {
-                Text("折线是每 \(bucketDescription)一格的平均值；浅色带是该格内的最低~最高值。")
+            if kind == .quantity, !points.isEmpty || !bars.isEmpty {
+                Text(chartNote)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -476,6 +542,8 @@ struct ChartView: View {
                 poincare = PoincareBuilder.build(from: fetch.series, filterEctopic: filterEctopic)
                 rrTruncated = fetch.isTruncated
                 points = []
+                bars = []
+                barStats = nil
                 sleepDays = []
                 sleepSegments = []
                 stats = nil
@@ -489,6 +557,8 @@ struct ChartView: View {
                 // 拍平放到这里做，视图里就只剩渲染
                 sleepSegments = ChartSeriesBuilder.sleepSegments(from: days)
                 points = []
+                bars = []
+                barStats = nil
                 stats = nil
                 poincare = nil
 
@@ -496,10 +566,22 @@ struct ChartView: View {
                 let rollups = try await store.rollups(metricID: metricID,
                                                       from: window.from,
                                                       to: window.to)
-                let built = ChartSeriesBuilder.points(from: rollups,
-                                                      displayBucket: range.displayBucket)
-                points = built
-                stats = ChartSeriesBuilder.stats(from: built)
+                if info.chartStyle == .bars {
+                    // 累计量：按**自然时间段求和**，粒度是 `barBucket`，
+                    // 和折线那个 `displayBucket` 不是一回事（见 ChartRange 的说明）。
+                    let built = ChartSeriesBuilder.bars(from: rollups, bucket: range.barBucket)
+                    bars = built
+                    barStats = ChartSeriesBuilder.barStats(from: built)
+                    points = []
+                    stats = nil
+                } else {
+                    let built = ChartSeriesBuilder.points(from: rollups,
+                                                          displayBucket: range.displayBucket)
+                    points = built
+                    stats = ChartSeriesBuilder.stats(from: built)
+                    bars = []
+                    barStats = nil
+                }
                 sleepDays = []
                 sleepSegments = []
                 poincare = nil
@@ -508,5 +590,106 @@ struct ChartView: View {
         } catch {
             loadError = "查询失败：\(error.localizedDescription)"
         }
+    }
+}
+
+// MARK: - 各种图表形态
+//
+// 刻意各自独立成一个小 struct，而不是在 `ChartView` 里用一堆 `@ViewBuilder` 计算属性：
+// 一个视图里塞四种图，SwiftUI 的类型推导很容易超时
+// （本项目已经踩过一次，见 `sleepContent` 那段注释）。
+// 每个 struct 只做一件事，每个 body 只有一层 `ForEach` + 一两个 Mark，推导瞬间结束。
+
+/// **高频连续量**：平均值折线 + 最低~最高波动带。
+///
+/// 为什么要有波动带：只有平均值的话，一次剧烈波动会被平均掉、完全看不见
+/// —— 而"运动时心率冲上去了"恰恰是用户最想看到的。
+private struct RangeBandChart: View {
+    let points: [ChartPoint]
+    let domain: ClosedRange<Double>
+
+    var body: some View {
+        Chart(points) { point in
+            AreaMark(x: .value("时间", point.date),
+                     yStart: .value("最低", point.minValue),
+                     yEnd: .value("最高", point.maxValue))
+                .foregroundStyle(Color.pink.opacity(0.15))
+
+            LineMark(x: .value("时间", point.date),
+                     y: .value("平均", point.average))
+                .foregroundStyle(Color.pink)
+                .interpolationMethod(.catmullRom)
+        }
+        .chartYScale(domain: domain)
+        .frame(height: 260)
+    }
+}
+
+/// **稀疏趋势量**：点 + 折线。
+///
+/// 这类指标的相邻测量之间确实存在生理上的连续变化（静息心率不会从 55 跳到 90），
+/// 所以连线是有信息的、不是伪造的。
+private struct TrendLineChart: View {
+    let points: [ChartPoint]
+    let domain: ClosedRange<Double>
+    let tint: Color
+
+    var body: some View {
+        Chart(points) { point in
+            LineMark(x: .value("时间", point.date),
+                     y: .value("值", point.average))
+                .foregroundStyle(tint)
+                .interpolationMethod(.monotone)
+
+            PointMark(x: .value("时间", point.date),
+                      y: .value("值", point.average))
+                .symbolSize(20)
+                .foregroundStyle(tint)
+        }
+        .chartYScale(domain: domain)
+        .frame(height: 260)
+    }
+}
+
+/// **离散点测量**：只画点，**不连线**。
+///
+/// ⚠️ 不连线是刻意的，也是这张图存在的全部理由：
+/// 血氧 / 呼吸频率 / 睡眠腕温都是"一天测几次"的点测，**中间那些小时根本没测**。
+/// 连成折线等于把"没测"伪装成"连续变化的平滑过渡" —— 图会**说谎**，
+/// 而且是那种没人会怀疑的说谎（曲线看着很合理）。
+private struct ScatterPointChart: View {
+    let points: [ChartPoint]
+    let domain: ClosedRange<Double>
+    let tint: Color
+
+    var body: some View {
+        Chart(points) { point in
+            PointMark(x: .value("时间", point.date),
+                      y: .value("值", point.average))
+                .symbolSize(30)
+                .foregroundStyle(tint.opacity(0.8))
+        }
+        .chartYScale(domain: domain)
+        .frame(height: 260)
+    }
+}
+
+/// **日累计量**：柱状。
+///
+/// `unit` 由调用方按时间范围给（一天的范围用小时、更长的用天）——
+/// 因为"一共多少"必须落在用户能理解的自然时间段上，
+/// 拆成 96 根 15 分钟的柱子等于把日总量藏起来。
+private struct CumulativeBarChart: View {
+    let bars: [BarPoint]
+    let unit: Calendar.Component
+    let tint: Color
+
+    var body: some View {
+        Chart(bars) { bar in
+            BarMark(x: .value("时间", bar.date, unit: unit),
+                    y: .value("累计", bar.total))
+                .foregroundStyle(tint.opacity(0.85))
+        }
+        .frame(height: 260)
     }
 }

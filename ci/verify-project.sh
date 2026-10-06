@@ -418,6 +418,39 @@ else
   ok "MetricDisplay 里没有重复 id"
 fi
 
+# 每个指标都必须**显式**声明图表形态。
+#
+# 为什么守这一条：`MetricDisplay.chartStyles` 有 `?? .line` 兜底，
+# 所以漏掉一个指标**不会报错**，只会让那个体征悄悄退回折线图 ——
+# 而"某个图又变回折线了"没有任何线索指向"配置漏了一行"。
+#
+# 判据：id 以**字典键**的形式出现（`"id": .xxx`）。
+# ⚠️ 不要只数 `"id"` 出现的次数 —— 像 `sleep_analysis` 在 `categoryLabel`
+#    里也出现过一次，那样计数会虚高、把漏配掩盖掉（这个守卫第一版就是这么写的）。
+# ⚠️ 也要先去掉注释，否则解释文字里的 id 会让计数虚高。
+NO_STYLE=$(for id in $(grep -oE 'id: "[A-Za-z0-9_]+"' shared/MetricDisplay.swift 2>/dev/null \
+                       | sed -e 's/id: "//' -e 's/"//' | sort -u); do
+             n=$(code_only shared/MetricDisplay.swift | grep -c "\"$id\":")
+             [ "$n" -lt 1 ] && printf '%s ' "$id"
+           done)
+if [ -z "$NO_STYLE" ]; then
+  ok "每个指标都显式声明了图表形态（没有落到折线兜底）"
+else
+  bad "这些指标没在 MetricDisplay.chartStyles 里声明图表形态（会静默退回折线图）：$NO_STYLE"
+fi
+
+# 反向：`chartStyles` 里不许有 `all` 里不存在的 id（改指标 id 时容易漏删）
+STRAY=$(grep -oE '^        "[A-Za-z0-9_]+":' shared/MetricDisplay.swift 2>/dev/null \
+        | sed -e 's/^ *"//' -e 's/":$//' | sort -u \
+        | while read -r id; do
+            grep -q "id: \"$id\"" shared/MetricDisplay.swift || printf '%s ' "$id"
+          done)
+if [ -z "$STRAY" ]; then
+  ok "chartStyles 里没有多余（已不存在的）指标 id"
+else
+  bad "chartStyles 里有 all 中不存在的指标 id：$STRAY"
+fi
+
 # ---------- 13. WatchConnectivity 接线 ----------
 # 「手机上一直没数据」有五六种原因，而它们**在界面上长得一模一样**。
 # 下面这些断言守的是其中最隐蔽的几类 —— 编译全过、运行也不崩，就是没数据。

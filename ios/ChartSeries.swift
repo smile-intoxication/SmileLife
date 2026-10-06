@@ -49,6 +49,17 @@ enum ChartRange: String, CaseIterable, Identifiable {
         }
     }
 
+    /// **柱状图**的聚合粒度。和上面的折线粒度是两回事，不能共用：
+    /// 折线看的是"这段时间的值大约是多少"，柱状看的是"这段时间**累计**了多少"。
+    /// 后者必须按自然时间段切 —— 否则"一天的活动能量"会被拆成 96 根 15 分钟的柱子，
+    /// 日总量根本看不出来（而活动能量 / 锻炼时间的全部意义就是日总量）。
+    var barBucket: TimeInterval {
+        switch self {
+        case .day:  return 3600        // 24 根，看一天之内的分布
+        default:    return 24 * 3600   // 每天一根，看日总量
+        }
+    }
+
     /// 查询窗口。
     func window(now: Date = .now) -> (from: Date, to: Date) {
         // 上界往后挪一点：样本的 startDate 可能刚好等于"现在"，
@@ -118,6 +129,27 @@ struct ChartStats {
     let sampleCount: Int
 }
 
+/// 柱状图的一根柱子：某个时间块内的**累计值**。
+///
+/// 刻意叫 `total` 而不是平均值 —— 活动能量、锻炼时间的含义就是"一共多少"，
+/// 用平均值画柱状图会得到一个和活动圆环完全对不上的数字。
+struct BarPoint: Identifiable {
+    var id: Date { date }
+    let date: Date
+    let total: Double
+    /// 这根柱子里有多少条原始样本。用于区分"这段时间真的没活动"和"没同步上"
+    let sampleCount: Int
+}
+
+/// 柱状图的统计量。
+struct BarStats {
+    let total: Double
+    let peak: Double
+    /// 每根柱子的平均量（日粒度下就是"日均"）
+    let perBar: Double
+    let barCount: Int
+}
+
 enum ChartSeriesBuilder {
 
     /// 把 15 分钟的汇总桶合并到展示粒度。
@@ -158,8 +190,56 @@ enum ChartSeriesBuilder {
         }
     }
 
-    static func stats(from points: [ChartPoint]) -> ChartStats? {
-        guard !points.isEmpty else { return nil }
+    /// 把 15 分钟汇总桶按**自然时间段**聚合成柱子（取和，不是取平均）。
+    ///
+    /// ⚠️ **"天"必须用 `Calendar.startOfDay` 对齐，不能用 epoch 取模**：
+    /// epoch 对齐出来的"天"是 **UTC 午夜**，在东八区就是早上 8 点 ——
+    /// 那样"一天的活动能量"实际统计的是 08:00–08:00，
+    /// 和用户理解的"一天"（以及活动圆环的日界线）对不上，**而且完全是静默的**。
+    /// 小时可以用 epoch 取模：所有真实时区的偏移都是 15 分钟的整数倍。
+    static func bars(from rollups: [RollupPoint],
+                     bucket: TimeInterval,
+                     calendar: Calendar = .current) -> [BarPoint] {
+        guard !rollups.isEmpty else { return [] }
+
+        var totals: [Date: (total: Double, count: Int)] = [:]
+        for rollup in rollups {
+            let key = barKey(rollup.bucketStart, bucket: bucket, calendar: calendar)
+            if var existing = totals[key] {
+                existing.total += rollup.sum
+                existing.count += rollup.count
+                totals[key] = existing
+            } else {
+                totals[key] = (total: rollup.sum, count: rollup.count)
+            }
+        }
+
+        return totals.keys.sorted().map { key in
+            // 显式写标签，不依赖元组标签推断
+            let entry = totals[key] ?? (total: 0, count: 0)
+            return BarPoint(date: key, total: entry.total, sampleCount: entry.count)
+        }
+    }
+
+    /// 柱子对齐：天走日历、小时走 epoch 取模（理由见 `bars` 的注释）。
+    static func barKey(_ date: Date, bucket: TimeInterval, calendar: Calendar) -> Date {
+        if bucket >= 24 * 3600 - 1 {
+            return calendar.startOfDay(for: date)
+        }
+        return BucketMath.floor(date, seconds: bucket)
+    }
+
+    static func barStats(from bars: [BarPoint]) -> BarStats? {
+        guard !bars.isEmpty else { return nil }
+        let total = bars.reduce(0.0) { $0 + $1.total }
+        let peak = bars.map(\.total).max() ?? 0
+        return BarStats(total: total,
+                        peak: peak,
+                        perBar: total / Double(bars.count),
+                        barCount: bars.count)
+    }
+
+    static func stats(from points: [ChartPoint]) -> ChartStats? {        guard !points.isEmpty else { return nil }
         var sum = 0.0
         var count = 0
         var low = Double.greatestFiniteMagnitude
