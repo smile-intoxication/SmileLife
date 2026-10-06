@@ -119,6 +119,177 @@ init(heartbeatSeries:dataHandler: (HKHeartbeatSeriesQuery, TimeInterval, Bool, B
 
 ## 2. Apple Watch 可采集的 HealthKit 数据类型全表
 
+### 2.0 速查（S12 / watchOS 27）
+
+> 本节是**取舍视角**的整理，回答"有什么、谁产生的、我们收不收"。
+> 逐类型的 Availability 徽章与官方链接在 §2.2–§2.9，两处不会重复列徽章。
+> 本节与那几张表**必须同步改** —— 同一批类型写在两个地方就一定会漂移。
+
+#### 先纠正一个常见误解：HealthKit 的类型可用性**不按机型分**
+
+它是**四个独立条件的交集**，机型只影响其中一条：
+
+| 条件 | 由什么决定 | 例子 |
+|---|---|---|
+| ① 类型存在 | **OS 版本**（Availability 徽章） | `heartRateVariabilityRMSSD` 要 watchOS 27 |
+| ② 本机会不会产生 | **硬件传感器** | SE 3 没有电学心率传感器 → 永不产生 ECG |
+| ③ 用户有没有开 | **设置 / 主动操作** | 不开"不齐律通知"就没有 `irregularHeartRhythmEvent` |
+| ④ 地区有没有 | **法规**（Apple 的功能可用性） | 血氧在部分地区被关掉 |
+
+所以"**S12 能拿到哪些**"这个问题的准确答案是：
+**类型清单由 watchOS 版本决定，实际有没有数据由 ②③④ 决定。**
+`S12` 这个机型名不构成任何一条 API 前提（代码里**不要**写机型判断）。
+
+#### S12 的硬件底座（决定②）
+
+| 传感器 | S12 / Ultra 4 | 决定了哪些指标 |
+|---|---|---|
+| 光学心率（新绿色 LED 阵列） | ✅ | `heartRate`、`restingHeartRate`、`walkingHeartRateAverage`、HRV、`atrialFibrillationBurden`、`hypertensionEvent` |
+| 电学心率（数码表冠电极） | ✅（**SE 3 ❌**） | `HKElectrocardiogram` |
+| 血氧 | ✅（**SE 3 ❌**，且受地区限制） | `oxygenSaturation` |
+| 双温度传感器（腕温） | ✅ | `appleSleepingWristTemperature` |
+| 加速计 / 陀螺仪 / 气压计 | ✅ | 活动圆环、步数、爬楼、`physicalEffort` |
+| 环境光 | ✅ | `timeInDaylight` |
+| 麦克风（只测声压，**不录音**） | ✅ | `environmentalAudioExposure` |
+| 水深计 / 水温 | **只有 Ultra** | `underwaterDepth`、`waterTemperature` |
+| UV / 血压计 / 血糖 / 核心体温计 | ❌ **任何机型都没有** | 见 §2.10② |
+
+> ⚠️ **S12 最容易误判的一点**：Apple 只公布了手表**测量**心率的节奏
+> （"every five seconds, all day long"，Newsroom 2026-09-09），
+> **没有说多少条会写进 HealthKit**（白皮书里后台写入仍是"每 5 分钟一条"）。
+> 这是本项目第 1 号待验证项，用 **手表「诊断」界面**回答。
+
+#### ① 手表**自己产生**的数据 —— 可以放心当数据源
+
+**A. 心率族（本项目主体）**
+
+| 常量 | 我们收不收 | 节奏 |
+|---|---|---|
+| `heartRate` | ✅ 已收（首次回看 1 天） | 后台 + 运动时高频；**警告：会被 condense，见 §3.6** |
+| `restingHeartRate` | ✅ 已收 | 后台自动，**随当日数据变准会覆盖**旧样本 |
+| `walkingHeartRateAverage` | ✅ 已收 | 后台自动，只读、覆盖式 |
+| `heartRateVariabilitySDNN` | ✅ 已收 | 默认 4 小时；开不齐律通知 → 2 小时；AFib History → 15 分钟 |
+| 🆕 `heartRateVariabilityRMSSD` | ✅ 已收（**运行时探测**） | watchOS 27 新增；**官方页面无正文，是否自动写入未知** |
+| `heartRateRecoveryOneMinute` | ⬜ 未收 | 每次运动结束 1 条 |
+| `HKHeartbeatSeriesSample` | ⬜ 未收（探测中） | **逐拍时间戳 → 唯一的自动 RR 间期来源**；触发条件官方未写，见 §1.3 |
+| `HKElectrocardiogram` | ⬜ 未收 | **用户主动测量**，30 秒/次，可自行算 RR |
+| `atrialFibrillationBurden` | ⬜ 未收 | 每周 1 条；Watch 采集、**iPhone 计算** |
+| `lowHeartRateEvent` / `highHeartRateEvent` | ⬜ 未收 | 事件驱动，阈值在 metadata |
+| `irregularHeartRhythmEvent` | ⬜ 未收 | 后台"偶尔检查"，**Apple 未给固定间隔** |
+
+**B. 呼吸 / 血氧 / 体温**
+
+| 常量 | 我们收不收 | 节奏 |
+|---|---|---|
+| `oxygenSaturation` | ✅ 已收 | 按需 + 不活动时（含睡眠）周期性；**受地区限制** |
+| `respiratoryRate` | ✅ 已收 | 后台自动，**以睡眠期间为主** |
+| `appleSleepingWristTemperature` | ✅ 已收 | 睡眠中每 5 秒采样 → **整夜聚合成 1 条** |
+| `appleSleepingBreathingDisturbances` | ⬜ 未收 | 整夜分析（睡眠呼吸暂停） |
+
+**C. 睡眠 / 正念 / 日光**
+
+| 常量 | 我们收不收 | 备注 |
+|---|---|---|
+| `sleepAnalysis` | ✅ 已收 | 枚举型（卧床/清醒/核心/深睡/REM）；**Watch 只记夹在两段睡眠之间的 `awake`** |
+| `mindfulSession` | ⬜ 未收 | 用户主动 |
+| `timeInDaylight` | ⬜ 未收 | 环境光，后台累计 |
+
+**D. 活动 / 运动 / 体能**
+
+| 常量 | 我们收不收 | 备注 |
+|---|---|---|
+| `activeEnergyBurned` | ✅ 已收（**默认关**） | Move 环；会被 condense |
+| `appleExerciseTime` | ✅ 已收（**默认关**） | Exercise 环 |
+| `vo2Max` | ✅ 已收（**默认关**） | 需先戴 ≥1 天，首次运动不生成 |
+| `basalEnergyBurned` | ⬜ 未收 | 静息能量 |
+| `appleMoveTime` / `appleStandTime` / `appleStandHour` | ⬜ 未收 | 三个环的细项 |
+| `stepCount` / `distanceWalkingRunning` / `flightsClimbed` | ⬜ 未收 | **iPhone 也会产生**，不算手表独有 |
+| `distanceCycling` / `distanceSwimming` / `swimmingStrokeCount` | ⬜ 未收 | 运动时 |
+| `physicalEffort`（METs） | ⬜ 未收 | 后台自动 |
+| `workoutEffortScore` / `estimatedWorkoutEffortScore` | ⬜ 未收 | 每次训练后 |
+| `HKWorkout` | ⬜ 未收 | 复合样本；**要做"按运动分段"就必须收它** |
+| `lowCardioFitnessEvent` | ⬜ 未收 | 约每 4 个月一次 |
+| `distanceWheelchair` / `pushCount` | ⬜ 未收 | 轮椅模式 |
+
+**E. 步态（手表**有**的那部分）**
+
+| 常量 | 我们收不收 | 备注 |
+|---|---|---|
+| `sixMinuteWalkTestDistance` | ⬜ 未收 | 每周 1 条估算，设 500 m 上限 |
+| `stairAscentSpeed` / `stairDescentSpeed` | ⬜ 未收 | 需爬 ≥3 米楼梯，每天约 20 条 |
+| `numberOfTimesFallen` | ⬜ 未收 | 用户取消提醒则不记录 |
+
+**F. 听觉**
+
+| 常量 | 我们收不收 | 备注 |
+|---|---|---|
+| `environmentalAudioExposure` | ⬜ 未收 | 只测声压，**Apple 不录音** |
+| `headphoneAudioExposure` | ⬜ 未收 | iPhone 或手表（配耳机） |
+| `environmentalAudioExposureEvent` / `headphoneAudioExposureEvent` | ⬜ 未收 | 超标事件 |
+
+**G. 事件 / 风险提示（都不是"数值"）**
+
+`hypertensionEvent`（26.2+，光学心率被动分析，**以 30 天为周期**）、`handwashingEvent`、
+`appleWalkingSteadinessEvent`、`lowCardioFitnessEvent`、环境噪声/耳机音量超标事件。
+
+> ⚠️ `hypertensionEvent` **不是血压值**。Apple Watch 没有血压计，它只是被动风险提示。
+
+#### ② iPhone 产生的 —— **不要**放进手表端
+
+这一组的徽章都写着 watchOS 7.0+，看起来"手表可用"，但**数据全部由 iPhone 产生**，
+Apple Watch 一条都不写。把它们当手表数据源，采集方案会直接落空：
+
+`appleWalkingSteadiness`、`appleWalkingSteadinessEvent`、
+**`walkingSpeed`、`walkingStepLength`、`walkingAsymmetryPercentage`、`walkingDoubleSupportPercentage`**
+（后 4 个注意**没有 `apple` 前缀**）、`basalBodyTemperature`（手动/第三方）、
+`environmentalSoundReduction`（AirPods 等耳机）。
+
+> 但这不等于"iOS 端不能收" —— iPhone 端**可以读**这些（它们是 iPhone 产生并存在
+> iPhone 的 HealthKit 里的）。只是**别指望手表端采到**。
+
+#### ③ 手表**没有**的（别抱期望）
+
+| 指标 | 真相 |
+|---|---|
+| UV / 紫外线 | 没有任何 Watch 机型有 UV 传感器 |
+| 血压 | 无血压计；`hypertensionEvent` 只是风险提示 |
+| 血糖 | 无传感器，需第三方 CGM |
+| 核心体温 | 手表只写**腕温**，不写 `bodyTemperature` |
+| `peripheralPerfusionIndex` | 需第三方医疗设备写入 |
+| `toothbrushingEvent` | 手表无刷牙检测，需第三方电动牙刷 App |
+| 身高 / 体重 / BMI / 月经 / 绝经状态 | 手动录入或第三方设备 |
+
+#### ④ 我们当前收了哪些
+
+`watch/Health/MetricCatalog.swift` 里共 **12 个**指标（`shared/MetricDisplay.swift`
+是展示元数据的唯一定义处，两边 id 由自检脚本第 12 节强制一致）：
+
+- **默认开启 9 个**：心率、静息心率、步行心率、HRV(SDNN)、HRV(RMSSD)、呼吸频率、血氧、睡眠腕温、睡眠
+- **默认关闭 3 个**：活动能量、锻炼时间、最大摄氧量（用户可在设置里打开）
+
+**建议的下一步候选**（按"值不值得为此加一个指标"排序）：
+
+| 候选 | 理由 |
+|---|---|
+| `HKWorkout` | 唯一的"把一天切成若干段"的依据。现在画心率曲线，运动期间的高心率和平静期混在一起，看不出"那次跑步" |
+| `heartRateRecoveryOneMinute` | 一条就能反映心肺恢复能力，数据量极小 |
+| `appleSleepingBreathingDisturbances` | 与已有的睡眠数据天然配套，用户关心度高 |
+| `timeInDaylight` | 数据量小、隐私敏感度低，属于"顺手就有"的加分项 |
+| `HKHeartbeatSeriesSample` | **先看诊断界面的实测结果**再决定 —— 它才是真正的 RR 间期来源（§1.3） |
+| `HKElectrocardiogram` | 需要用户主动操作，采不到稳定数据；但如果要做"HRV 深度分析"，它是唯一的高采样率来源 |
+
+#### ⑤ 读这张清单时最容易踩的三件事
+
+1. **`walkingHeartRateAverage` 等会被系统覆盖**：同一天重新计算后，旧样本的值会变。
+   本地库必须按 `uuid` **upsert 更新**，不能"已存在就跳过"（手机端已经这么做了）。
+2. **`heartRate` 会被 condense**：`HKQuantitySample.count > 1` 说明它其实是个 series，
+   必须用 `HKQuantitySeriesSampleQuery` 拆开读，否则拿到的是"一条覆盖很长区间、带平均值"的样本（§3.6）。
+3. **只读类型不能写回**：`HKElectrocardiogram`、`HKHeartbeatSeriesSample`、
+   `atrialFibrillationBurden`、各类事件、`appleSleepingWristTemperature`、
+   `walkingHeartRateAverage` —— 这些只能读出来存到自己库里，**不能请求写授权**（§2.10③）。
+
+---
+
 ### 2.1 怎么读这张表（图例）
 
 - **★Watch独有**：Apple 官方文档明确该样本**由 Apple Watch 产生**，iPhone 无法产生；
