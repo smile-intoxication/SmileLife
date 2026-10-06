@@ -231,9 +231,12 @@ actor HealthStore {
         }
 
         if !broken.isEmpty {
-            print("[Outbox] ⚠️ 丢弃 \(broken.count) 行无法解码的队列条目（否则会永久堵住队列）")
+            // 刻意先拷成 `let` 再进 `#Predicate`：
+            // 谓词表达式会被编译器重写成逃逸闭包，捕获 `var` 是不必要的风险。
+            let brokenIDs = broken
+            print("[Outbox] ⚠️ 丢弃 \(brokenIDs.count) 行无法解码的队列条目（否则会永久堵住队列）")
             try modelContext.delete(model: PendingUploadRecord.self,
-                                    where: #Predicate { broken.contains($0.id) })
+                                    where: #Predicate { brokenIDs.contains($0.id) })
             try modelContext.save()
         }
 

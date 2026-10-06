@@ -95,20 +95,26 @@ final class WatchServices {
     ///   顺势把剩下的继续发出去（这就是背压的"解锁"时机）。
     /// - `onActivationChanged`：会话刚激活时，把之前因为未激活而发不出去的补上。
     func startLink() {
-        // ⚠️ 用 `[weak flusher]` 而不是强引用：`WatchLinkSession.shared` 会持有这两个闭包，
-        //    而 flusher 又持有 `WatchLinkSession.shared` —— 强引用会形成一个环。
-        //    这里虽然是"活到进程结束"的单例、成环不会泄漏出问题，
-        //    但成环会让"谁持有谁"彻底说不清，以后想改生命周期时会踩到。
-        WatchLinkSession.shared.onTransferSettled = { [weak outboxFlusher] _, error in
+        // 先取到局部 `let`，再在捕获列表里 weak 它。
+        // ⚠️ 不用 `[weak outboxFlusher]` 直接捕获属性：捕获列表里读实例属性
+        //    会牵扯到"闭包内是否必须显式 self"的规则，而这里完全没有必要去赌它。
+        //
+        // 为什么是 weak：`WatchLinkSession.shared` 会持有这两个闭包，
+        // 而 flusher 又持有 `WatchLinkSession.shared` —— 强引用会成环。
+        // 这里虽然是"活到进程结束"的单例、成环不会泄漏出问题，
+        // 但成环会让"谁持有谁"彻底说不清，以后想改生命周期时会踩到。
+        let flusher = outboxFlusher
+
+        WatchLinkSession.shared.onTransferSettled = { [weak flusher] _, error in
             // 失败不重试：`transferUserInfo` 的失败几乎都是"对端 app 没装"这类
             // 不会因为立刻重试而改变的原因。重试只会空转，把后台预算烧光。
-            guard error == nil, let outboxFlusher else { return }
-            Task { await outboxFlusher.flush(budget: 5) }
+            guard error == nil, let flusher else { return }
+            Task { await flusher.flush(budget: 5) }
         }
 
-        WatchLinkSession.shared.onActivationChanged = { [weak outboxFlusher] in
-            guard let outboxFlusher else { return }
-            Task { await outboxFlusher.flush(budget: 5) }
+        WatchLinkSession.shared.onActivationChanged = { [weak flusher] in
+            guard let flusher else { return }
+            Task { await flusher.flush(budget: 5) }
         }
 
         WatchLinkSession.shared.activate()
