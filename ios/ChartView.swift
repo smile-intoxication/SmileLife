@@ -9,12 +9,21 @@ import Charts
 /// 所以：**折线读 `PhoneRollup`（15 分钟汇总桶），睡眠读原始样本**
 /// （睡眠一天只有几十段，量小，而且"阶段时长求和"这种聚合方式与
 /// min/max/avg 完全不同，硬塞进汇总表只会让含义变模糊）。
-struct ChartView: View {
+/// 一张卡片 = 一个指标（或 RR 散点图）的图。
+///
+/// **自己取自己的数** —— 每张卡有自己的加载状态。全塞进一个大视图里循环的话，
+/// 会变成十几个 `@State` 数组，而且更容易触发 SwiftUI 的类型推导超时。
+struct MetricChartCard: View {
+
+    let item: ChartPickerItem
+    let range: ChartRange
+
+    /// 这个指标在 `MetricDisplay` 里的 id。
+    /// RR 间期**不是 HealthKit 指标**，在这里查不到会拿到 fallback ——
+    /// 所以"当前画的是哪一类"由 `kind` 判断，不靠这个 id 猜。
+    private var metricID: String { item.id }
 
     @ObservedObject private var status = LinkStatus.shared
-
-    @State private var metricID = "heart_rate"
-    @State private var range: ChartRange = .week
 
     @State private var points: [ChartPoint] = []
     /// 柱状图的数据（日累计量用）。和 `points` 是**互斥**的两套：
@@ -30,8 +39,6 @@ struct ChartView: View {
     @State private var poincare: PoincareResult?
     /// 是否剔除早搏／伪影。做成开关：关掉时看到的**原始**早搏分布本身也有分析价值。
     @State private var filterEctopic = true
-    /// 本机有没有收到过心跳序列 —— 决定选择器里要不要出现 RR 那一项
-    @State private var hasRRSeries = false
     /// RR 序列查询是否因为条数上限被截断（要在界面上如实说明）
     @State private var rrTruncated = false
     @State private var isLoading = false
@@ -52,34 +59,11 @@ struct ChartView: View {
         return info.kind == .category ? .category : .quantity
     }
 
-    /// 选择器里的一项。
-    private struct ChartPickerItem: Identifiable {
-        let id: String
-        let title: String
-        let symbolName: String
-    }
-
-    /// 选择器的内容。
+    /// 重新取数的触发键：时间范围或数据版本一变就重跑 `.task(id:)`。
     ///
-    /// RR 间期那一项**只在真的收到过心跳序列时才出现**：这条链路依赖手表
-    /// 产生 `HKHeartbeatSeriesSample`（很可能需要开房颤历史），
-    /// 对一个"可能永远没有"的功能，留一个永远为空的入口比没有入口更糟。
-    private var pickerItems: [ChartPickerItem] {
-        var items = MetricDisplay.all.map {
-            ChartPickerItem(id: $0.id, title: $0.title, symbolName: $0.symbolName)
-        }
-        if hasRRSeries {
-            items.append(ChartPickerItem(id: RRPoincare.metricID,
-                                         title: RRPoincare.title,
-                                         symbolName: RRPoincare.symbolName))
-        }
-        return items
-    }
-
-    private var selectedItem: ChartPickerItem {
-        pickerItems.first { $0.id == metricID }
-            ?? ChartPickerItem(id: metricID, title: metricID, symbolName: "questionmark.circle")
-    }
+    /// 用它而不是几个 `onChange`：`.task(id:)` 在 id 变化时**还会取消**
+    /// 上一次没跑完的取数 —— 快速切换时间范围时不会有一堆过期的查询在后台打架。
+    private var reloadKey: String { "\(range.rawValue)#\(status.dataVersion)" }
 
     /// y = x 参考线的两个端点。
     ///
@@ -95,78 +79,36 @@ struct ChartView: View {
                                   DiagonalPoint(id: 1, value: 2000)]
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    selectors
+        VStack(alignment: .leading, spacing: 12) {
+            cardHeader
 
-                    switch kind {
-                    case .category:   sleepContent
-                    case .rrPoincare: poincareContent
-                    case .quantity:   quantityContent
-                    }
-
-                    if let loadError {
-                        Text(loadError)
-                            .font(.footnote)
-                            .foregroundStyle(.orange)
-                    }
-
-                    provenanceNote
-                }
-                .padding()
+            switch kind {
+            case .category:   sleepContent
+            case .rrPoincare: poincareContent
+            case .quantity:   quantityContent
             }
-            .navigationTitle("图表")
-            .refreshable { await load() }
+
+            if let loadError {
+                Text(loadError)
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
+
+            provenanceNote
         }
-        .task { await load() }
-        .onChange(of: metricID) { _, _ in Task { await load() } }
-        .onChange(of: range) { _, _ in Task { await load() } }
-        .onChange(of: status.dataVersion) { _, _ in Task { await load() } }
+        .padding(14)
+        .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 16))
+        .task(id: reloadKey) { await load() }
     }
 
-    // MARK: - 选择器
-
-    /// 指标选择器的标签。
-    ///
-    /// 单独拆出来不是为了复用，而是为了**压平类型推导**：
-    /// `Menu { ... } label: { 一长串带修饰符的 HStack }` 这种嵌套很容易让
-    /// SwiftUI 的类型推导变慢甚至超时（同一个文件里的 `sleepContent` 就超时过）。
-    private var metricMenuLabel: some View {
-        HStack {
-            Image(systemName: selectedItem.symbolName)
-            Text(selectedItem.title).font(.headline)
+    /// 卡片标题。单独拆出来是为了压平类型推导（同 `sleepContent` 的教训）。
+    private var cardHeader: some View {
+        HStack(spacing: 8) {
+            Image(systemName: item.symbolName)
+                .foregroundStyle(tintColor)
+            Text(item.title)
+                .font(.headline)
             Spacer()
-            Image(systemName: "chevron.up.chevron.down").font(.caption)
-        }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 14)
-        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var selectors: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Menu {
-                ForEach(pickerItems) { item in
-                    Button {
-                        metricID = item.id
-                        // 心跳序列是被动采样、主要在睡眠中出现，一天可能只有几条 ——
-                        // 24 小时窗口经常是空的。切到这一项时自动放宽到 7 天。
-                        if item.id == RRPoincare.metricID { range = .week }
-                    } label: {
-                        Label(item.title, systemImage: item.symbolName)
-                    }
-                }
-            } label: {
-                metricMenuLabel
-            }
-
-            Picker("时间范围", selection: $range) {
-                ForEach(ChartRange.allCases) { item in
-                    Text(item.title).tag(item)
-                }
-            }
-            .pickerStyle(.segmented)
         }
     }
 
@@ -222,6 +164,10 @@ struct ChartView: View {
     /// 好处是同一个颜色的图读法一样（点图就是点测、柱图就是累计），
     /// 换指标时不用重新理解这张图。
     private var tintColor: Color {
+        // RR 间期不是 HealthKit 指标，读 `info` 只会拿到 fallback（→ .line → 橙色）。
+        // 单独给一个颜色，让它在平铺的列表里一眼能认出来。
+        if kind == .rrPoincare { return .purple }
+
         switch info.chartStyle {
         case .lineWithRange: return .pink
         case .line:          return .orange
@@ -523,18 +469,6 @@ struct ChartView: View {
         let store = PhoneServices.shared.store
         let window = range.window()
 
-        // 先更新"本机有没有心跳序列"：它决定选择器里那一项在不在。
-        // 放最前面是因为下面可能要靠它把选中项回退掉。
-        hasRRSeries = ((try? await store.heartbeatSeriesCount()) ?? 0) > 0
-
-        // 数据被保留策略清掉、或者还没同步过来时，选中的那一项可能已经不在列表里了
-        // —— 那样菜单标题会退化成原始 id（`__rr_poincare__`），很难看。
-        // 回退到心率，并由 `onChange(of: metricID)` 再触发一次加载。
-        if metricID == RRPoincare.metricID && !hasRRSeries {
-            metricID = "heart_rate"
-            return
-        }
-
         do {
             switch kind {
             case .rrPoincare:
@@ -691,5 +625,136 @@ private struct CumulativeBarChart: View {
                 .foregroundStyle(tint.opacity(0.85))
         }
         .frame(height: 260)
+    }
+}
+
+// MARK: - 图表页
+
+/// 图表页上的一张卡的标识。
+///
+/// 放在文件作用域（而不是嵌在某个视图里）是因为**里外两个视图都要用它**：
+/// 外层决定"列出哪些"，内层负责"画哪一张"。
+private struct ChartPickerItem: Identifiable {
+    let id: String
+    let title: String
+    let symbolName: String
+}
+
+/// 图表页：**把每个体征的图都平铺出来**，不是"选一个看一个"。
+///
+/// ## 为什么不做选择器
+/// 选择器要求用户"先想好要看哪个" —— 而看健康数据的典型动作恰好相反：
+/// **先扫一眼，发现哪个不对劲再细看那个**。把图藏进菜单里的代价是
+/// 用户根本不会去点，等于那些指标白采了。
+///
+/// ## 数据来源与节奏
+/// 每张卡**自己取自己的数**（`MetricChartCard`），因为每个指标的聚合方式不同
+/// （折线读汇总桶、睡眠读原始样本、RR 读心跳序列），硬塞进一个循环只会变糊。
+/// 时间范围由这一层统一下发，切换时所有卡片一起重取。
+///
+/// ## 为什么只列有数据的指标
+/// 12 个指标全列出来会有大半是空图，把有数据的挤到屏幕外。
+/// 但**不隐藏事实**：没数据的在底部如实列出来（见 `emptyFootnote`）——
+/// "这里没有数据"和"这里没有这个功能"是两件完全不同的事。
+///
+/// ## 性能
+/// 用 `LazyVStack`：十几张 `Chart` 一次性全建出来会明显卡顿，
+/// 懒加载保证只渲染屏幕上真正看得到的那些。
+struct ChartView: View {
+
+    @ObservedObject private var status = LinkStatus.shared
+
+    /// 默认 **7 天**：一天的窗口对多数指标太窄（静息心率一天只有一两个点），
+    /// 而更长的窗口在手机上看不清日间波动。其他范围在分段控件里可选。
+    @State private var range: ChartRange = .week
+
+    @State private var summaries: [PhoneMetricSummary] = []
+    @State private var heartbeatSeriesCount = 0
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    rangePicker
+
+                    ForEach(populatedItems) { item in
+                        MetricChartCard(item: item, range: range)
+                    }
+
+                    emptyFootnote
+
+                    Text("数据由 Apple Watch 采集，经 WatchConnectivity 传到本机。"
+                         + "所有派生计算（RR 间期、Poincaré、SDNN…）都在手机上完成，"
+                         + "手表只负责搬运原始数据。")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding()
+            }
+            .navigationTitle("图表")
+            .refreshable { await loadSummaries() }
+        }
+        .task(id: status.dataVersion) { await loadSummaries() }
+    }
+
+    private var rangePicker: some View {
+        Picker("时间范围", selection: $range) {
+            ForEach(ChartRange.allCases) { item in
+                Text(item.title).tag(item)
+            }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    /// 列出哪些卡片。
+    ///
+    /// ⚠️ `summaries` 还没加载出来时**先全列**（每张卡自己会显示"暂无数据"）。
+    /// 否则会先闪一下空白、再出现内容 —— 那种闪动会让人以为数据丢了。
+    private var populatedItems: [ChartPickerItem] {
+        let known = !summaries.isEmpty
+        var items = MetricDisplay.all.compactMap { info -> ChartPickerItem? in
+            if known && count(of: info.id) == 0 { return nil }
+            return ChartPickerItem(id: info.id, title: info.title, symbolName: info.symbolName)
+        }
+        if heartbeatSeriesCount > 0 {
+            items.append(ChartPickerItem(id: RRPoincare.metricID,
+                                         title: RRPoincare.title,
+                                         symbolName: RRPoincare.symbolName))
+        }
+        return items
+    }
+
+    private var emptyItems: [MetricDisplay.Info] {
+        guard !summaries.isEmpty else { return [] }
+        return MetricDisplay.all.filter { count(of: $0.id) == 0 }
+    }
+
+    @ViewBuilder
+    private var emptyFootnote: some View {
+        if !emptyItems.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("暂无数据：\(emptyItems.count) 个指标")
+                    .font(.footnote.weight(.semibold))
+                Text(emptyItems.map(\.title).joined(separator: "、"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("「暂无数据」可能是没授权、手表没产生过这个类型、或者还没同步过来 —— "
+                     + "不能据此判断设备不支持。")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(14)
+            .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 16))
+        }
+    }
+
+    private func count(of metricID: String) -> Int {
+        summaries.first { $0.metricID == metricID }?.count ?? 0
+    }
+
+    private func loadSummaries() async {
+        let store = PhoneServices.shared.store
+        summaries = (try? await store.metricSummaries()) ?? []
+        heartbeatSeriesCount = (try? await store.heartbeatSeriesCount()) ?? 0
     }
 }
