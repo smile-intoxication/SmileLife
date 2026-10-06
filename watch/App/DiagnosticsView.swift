@@ -167,6 +167,11 @@ struct DiagnosticsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("心跳序列 / RR 间期（近 \(hb.days) 天）").font(.caption2)
                         Text("\(hb.seriesCount) 条序列").font(.system(size: 11, weight: .semibold))
+                        if let at = hb.latestSampleDate {
+                            Text("最新一条 \(Self.relative(at))")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                        }
                         if let beats = hb.beatsInLatestSeries {
                             Text("最新一条含 \(beats) 拍")
                                 .font(.system(size: 9))
@@ -177,7 +182,15 @@ struct DiagnosticsView: View {
                                 .font(.system(size: 9))
                                 .foregroundStyle(.secondary)
                         }
-                        Text("预期为 0：Apple 未声明手表会自动写这个类型")
+                        // ⚠️ 这条提醒不是凑字数的：v1.7 就是因为**没申请读这个类型的权限**，
+                        //    导致这里显示 0 条，而 0 条被误读成"设备不产生这个数据"。
+                        //    HealthKit 对没授权的类型返回空数组**而不是错误**，
+                        //    所以「0」永远是两种含义的叠加。
+                        Text("⚠️ 0 条有两种含义：设备没数据，或我们没拿到这个类型的读权限。"
+                             + "HealthKit 不报错，只返回空数组 —— 所以别只看这一行下结论。")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                        Text("被动逐拍数据预期需要开启「房颤历史」；移动心电图那条路要用户手动按表冠 30 秒。")
                             .font(.system(size: 9))
                             .foregroundStyle(.tertiary)
                     }

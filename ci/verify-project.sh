@@ -535,6 +535,36 @@ else
   ok "ios/ 没有用 watchOS 专属的 WCSession 属性"
 fi
 
+# ---------- 15. 探针查询的类型必须在读授权集合里 ----------
+# 通用问题：HealthKit 对**没授权的类型返回空数组、不返回错误**，
+# 所以"探针报 0 条"和"这台设备真的没这个数据"在界面上**长得一模一样**。
+# 只要探针查的类型漏在 readTypes 之外，这个探针的输出就完全不可信 —— 而且看不出来。
+#
+# 实测踩到过：心跳序列是 `HKSeriesType`（**不是** `HKQuantityType`），
+# 所以它进不了 `MetricCatalog.all` 那张指标表，也就没被加进 `readTypes`。
+# v1.7 的诊断界面因此报「近 7 天 0 条序列」，
+# 差点据此写下「房颤历史关闭时手表不写逐拍数据」的结论 —— 而那个 0 毫无意义。
+section "15. 探针查询的类型必须在读授权集合里"
+if grep -q 'HKSeriesType.heartbeat()' watch/Health/MetricCatalog.swift 2>/dev/null; then
+  ok "心跳序列类型在 MetricCatalog（读授权集合）里声明"
+else
+  bad "MetricCatalog 里没有 HKSeriesType.heartbeat() —— 心跳序列不在读授权集合里，探针报的「0 条」不可信"
+fi
+
+# 同一个类型不能在探针里就地构造：那会出现「申请的是 A、查的是 B」，
+# 而查询只返回空数组，表现成"设备没数据"。
+PROBE_INLINE=$(code_only watch/Health/HealthProbe.swift | grep -c 'HKSeriesType.heartbeat()')
+if [ "$PROBE_INLINE" -eq 0 ]; then
+  ok "探针没有就地构造心跳序列类型"
+else
+  bad "HealthProbe.swift 里就地写了 HKSeriesType.heartbeat() —— 必须改用 MetricCatalog.heartbeatSeriesType，否则两处可能不一致"
+fi
+if code_only watch/Health/HealthProbe.swift | grep -q 'MetricCatalog.heartbeatSeriesType'; then
+  ok "探针用的是 MetricCatalog.heartbeatSeriesType（单一来源）"
+else
+  bad "HealthProbe.swift 没有引用 MetricCatalog.heartbeatSeriesType"
+fi
+
 # ---------- 汇总 ----------
 printf '\n== 汇总：%d 通过，%d 失败\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

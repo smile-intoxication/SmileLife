@@ -137,7 +137,11 @@ actor HealthProbe {
     // MARK: 心跳序列（RR 间期）
 
     func heartbeatSeries(days: Int) async -> HeartbeatSeriesProbe {
-        let type = HKSeriesType.heartbeat()
+        // ⚠️ 用 `MetricCatalog.heartbeatSeriesType` 而不是就地 `HKSeriesType.heartbeat()`：
+        //    这个类型**同时**是"读授权的类型"和"要查的类型"，
+        //    两处各写一遍就可能出现「申请了 A、查的是 B」——而那种情况下查询返回空数组，
+        //    表现成"设备没数据"，完全看不出来。
+        let type = MetricCatalog.heartbeatSeriesType
         let from = Date().addingTimeInterval(-Double(days) * 86400)
         let predicate = HKQuery.predicateForSamples(withStart: from, end: nil, options: .strictStartDate)
         let samples = await fetch(type: type, predicate: predicate, limit: HKObjectQueryNoLimit, ascending: false)

@@ -233,9 +233,27 @@ enum MetricCatalog {
         )
     ]
 
+    /// 心跳序列（逐拍时间戳）的**读授权类型**。
+    ///
+    /// ## ⚠️ 为什么它必须单独列出来（这是一个真踩过的坑）
+    /// 它**不是** `HKQuantityType`，而是 `HKSeriesType` —— 所以它进不了下面那张
+    /// `all` 指标表（那张表是按 quantity/category 设计的），必须**单独**塞进 `readTypes`。
+    ///
+    /// 不加的后果极其隐蔽，因为 HealthKit 对**没授权的类型返回空数组、不报错**：
+    /// 「0 条」看起来就像"这台设备不产生这个数据"，其实只是**我们从来没申请过读权限**。
+    ///
+    /// 实测踩到过：v1.7 的诊断界面报「近 7 天 0 条序列」，
+    /// 差点据此得出「房颤历史关闭时 Apple Watch 不写逐拍数据」的结论 ——
+    /// 而那个 0 完全不可信（当时根本没申请过这个权限）。
+    /// 自检脚本第 15 节守着"探针查的类型必须在读授权集合里"。
+    static let heartbeatSeriesType: HKSeriesType = HKSeriesType.heartbeat()
+
     /// 只读授权需要请求的类型集合
     static var readTypes: Set<HKObjectType> {
-        Set(all.map { $0.sampleType as HKObjectType })
+        var types = Set(all.map { $0.sampleType as HKObjectType })
+        // 心跳序列不在上面的指标表里（它是 HKSeriesType，不是 HKQuantityType）
+        types.insert(heartbeatSeriesType)
+        return types
     }
 
     static func descriptor(id: String) -> MetricDescriptor? {
