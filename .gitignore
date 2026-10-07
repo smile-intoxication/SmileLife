@@ -39,3 +39,7 @@ log/
 *.mobileprovision
 *.cer
 *.key
+
+# ---- Python（本地验证脚本的缓存，不要入库）----
+__pycache__/
+*.pyc
