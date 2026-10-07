@@ -265,18 +265,31 @@ struct HRVResult: Sendable {
     }
 }
 
-/// 「河流图」用的一个整点桶：那一小时里所有序列的 LF/HF 归一化**均值**。
-struct HRVTrendBucket: Identifiable, Sendable {
-    var id: Double { hourStart.timeIntervalSince1970 }
-    let hourStart: Date
+/// 「河流图」上的一个点：**一条序列**的 LF/HF 归一化值。
+///
+/// ⚠️ 刻意**不做任何平均、也不按小时聚合** —— 每条序列就是图上的一个位置。
+/// 需求方明确要求过这一点（我第一版按小时取了均值，被否了）。
+struct HRVTrendPoint: Identifiable, Sendable {
+    var id: Double { date.timeIntervalSince1970 }
+    let date: Date
     let lfNorm: Double
     let hfNorm: Double
-    /// 这一小时里参与平均的序列条数。
-    ///
-    /// **必须显示出来**：均值本身也有不确定度，而条数少的时候那个不确定度很大
-    /// （实测：单条散布 22%、平均 5 条 10%、平均 10 条 7%）。
-    /// 只给一个平均数、不告诉用户它是几条平均出来的，等于把不确定度藏起来。
-    let seriesCount: Int
+    /// 这条序列的 NN 间期个数 —— 用来看"这个点本身有多稳"（实测 40 秒时散布 22%）。
+    let intervalCount: Int
+}
+
+/// 近 N 天的归一化趋势 + **如实回报哪些没画进去**。
+///
+/// 只返回点是不够的：界面必须能说清"这段时间到底有没有记录"。
+/// 把"记录太短"和"根本没记录"混成同一个"空"，用户会以为那段时间没戴表。
+struct HRVTrend: Sendable {
+    let points: [HRVTrendPoint]
+    /// 因为 NN 间期不够 `HRVMetrics` 的门槛而**没画**的序列条数
+    let skippedShort: Int
+    /// 因为不自洽（拍数与时间戳个数对不上）而跳过的序列条数
+    let skippedInconsistent: Int
+    /// 归一化门槛（从 `HRVMetrics` 取，避免两处各说一套）
+    let minimumIntervals: Int
 }
 // MARK: - 分析器
 

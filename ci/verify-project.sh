@@ -927,8 +927,28 @@ else
 fi
 
 # 河流图的三条语义要求
+# 🔴 **逐条序列，不许按小时平均** —— 需求方明确否掉过第一版的"按小时取均值"：
+# 均值会把"这一小时有 5 条"和"只有 1 条"抹平成同一个数，
+# 而这两件事的可信度差得很远（实测：单条散布 22%、平均 5 条 10%）。
+if awk '/func hrvNormTrend/,/^    }/' ios/PhoneStore.swift | grep -q 'of: \.hour'; then
+  bad "hrvNormTrend 里出现了按小时聚合 —— 河流图必须逐条序列画，不许取平均"
+else
+  ok "河流图是逐条序列（没有按小时平均）"
+fi
+# 河流图要用 AreaMark（平滑带状），不是一堆柱子
+if grep -q 'AreaMark' ios/HRVCards.swift 2>/dev/null; then
+  ok "河流图用的是 AreaMark（带状），不是柱状"
+else
+  bad "河流图没有用 AreaMark —— 河流图要的是连续带状，不是柱子"
+fi
+# 跳过的序列数必须能回报到界面（不然"记录太短"会被读成"那段时间没戴表"）
+if grep -q 'skippedShort' ios/HRVCards.swift 2>/dev/null; then
+  ok "界面会如实说明有多少条序列因太短没画进去"
+else
+  bad "界面没有回报 skippedShort —— 「记录太短」会被误读成「没有记录」"
+fi
 if grep -q 'hrvNormTrend' ios/PhoneStore.swift 2>/dev/null; then
-  ok "河流图的数据来自整点聚合（PhoneStore.hrvNormTrend）"
+  ok "河流图的数据来自逐条序列（PhoneStore.hrvNormTrend）"
 else
   bad "缺少 PhoneStore.hrvNormTrend —— 河流图没有数据来源"
 fi

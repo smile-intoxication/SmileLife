@@ -426,125 +426,48 @@ actor PhoneStore {
         }
         return nil
     }
-    /// 近 N 天**每小时**的 LF / HF 归一化均值（"河流图"用）。
+    /// 近 N 天**每条序列**的 LF / HF 归一化值（"河流图"用）。
     ///
-    /// ## 为什么按小时聚合，而不是每条序列一个点
-    /// 每条序列只覆盖约 1 分钟。7 天里几十上百条这样的细条摊在同一条横轴上，
-    /// 会**全部塌成像素点**，什么也看不出来。按小时聚成均值才有一条能读的"河"。
+    /// ## 逐条序列，不做平均
+    /// 我第一版按小时取了均值，需求方明确否掉：**要的是每条序列各自的点**。
+    /// 这个要求是对的 —— 均值会把"这一小时里有 5 条"和"只有 1 条"抹平成同一个数，
+    /// 而这两件事的可信度差得很远（实测：单条散布 22%、平均 5 条 10%）。
     ///
-    /// ## 为什么短序列可以做均值（而单条序列的门槛更高）
-    /// **平均能降方差 —— Welch 法的核心就是这个。** 实测（`ci/hrv_check_hourly.py`）：
-    /// 单条约 40 秒的 LF Norm 5%~95% 散布 **22%**；平均 5 条降到 **10%**、
-    /// 平均 10 条降到 **7%**（相当于一条 300 秒记录）。
-    /// ⚠️ 但**偏差修不掉**：我们的 LF Norm 系统性偏低约 **3 个百分点**，
-    /// 而且**各种长度下都一样** —— 所以**看趋势有效，绝对值不能当临床数字读**。
-    ///
-    /// ## ⚠️ 没有数据的整点**不出现在结果里**
-    /// 刻意不补 0、不做插值：序列之间隔着几十分钟到几小时，
-    /// 把它们连起来等于**伪造连续性**。出图时那些位置就是**空的**。
-    func hrvNormTrend(days: Int) throws -> [HRVTrendBucket] {
+    /// ## 门槛从 `HRVMetrics` 取，不写死
+    /// 不够长的序列**直接跳过并计数**，由界面如实说明
+    /// —— 不然"记录太短"会被读成"那段时间没戴表"。
+    func hrvNormTrend(days: Int) throws -> HRVTrend {
         let cutoff = Date().addingTimeInterval(-Double(days) * 24 * 3600)
         let descriptor = FetchDescriptor<PhoneHeartbeatSeries>(
             predicate: #Predicate { $0.startDate >= cutoff },
             sortBy: [SortDescriptor(\.startDate)]
         )
         let records = try modelContext.fetch(descriptor)
-        let calendar = Calendar.current
+        let minimum = HRVMetrics.metric(id: "lf_norm")?.minimumIntervals ?? 40
 
-        var sums: [Date: (lf: Double, hf: Double, count: Int)] = [:]
+        var points: [HRVTrendPoint] = []
+        var skippedShort = 0
+        var skippedInconsistent = 0
+
         for record in records {
-            guard record.isSelfConsistent else { continue }
+            guard record.isSelfConsistent else {
+                skippedInconsistent += 1
+                continue
+            }
             guard let result = HRVAnalyzer.analyze(beatOffsetsMillis: record.beatOffsetsMillis,
                                                    gapsBeforeBeat: record.gapFlags),
-                  let lf = result.lfNorm, let hf = result.hfNorm else { continue }
-            let hour = calendar.dateInterval(of: .hour, for: record.startDate)?.start
-                ?? record.startDate
-            var entry = sums[hour] ?? (0, 0, 0)
-            entry.lf += lf
-            entry.hf += hf
-            entry.count += 1
-            sums[hour] = entry
+                  let lf = result.lfNorm, let hf = result.hfNorm else {
+                skippedShort += 1
+                continue
+            }
+            points.append(HRVTrendPoint(date: record.startDate,
+                                        lfNorm: lf,
+                                        hfNorm: hf,
+                                        intervalCount: result.nnMillis.count))
         }
 
-        return sums
-            .map { hour, entry in
-                HRVTrendBucket(hourStart: hour,
-                               lfNorm: entry.lf / Double(entry.count),
-                               hfNorm: entry.hf / Double(entry.count),
-                               seriesCount: entry.count)
-            }
-            .sorted { $0.hourStart < $1.hourStart }
+        return HRVTrend(points: points,
+                        skippedShort: skippedShort,
+                        skippedInconsistent: skippedInconsistent,
+                        minimumIntervals: minimum)
     }
-
-    // MARK: - 读取：概览与状态
-
-    /// 每个指标的最新值 / 总条数 / 时间范围。
-    ///
-    /// 刻意按 `MetricDisplay.all` 的**注册顺序**遍历，
-    /// 而且**没有数据的指标也会返回**（count = 0）：
-    /// 否则用户看到的是"少了几个指标"，而不是"这几个指标没数据"——
-    /// 前者看起来像 bug，后者才是事实。
-    func metricSummaries() throws -> [PhoneMetricSummary] {
-        MetricDisplay.all.map { info in
-            let id = info.id
-            let count = (try? modelContext.fetchCount(
-                FetchDescriptor<PhoneSample>(predicate: #Predicate { $0.metricID == id })
-            )) ?? 0
-
-            var latest: PhoneSample?
-            if count > 0 {
-                var descriptor = FetchDescriptor<PhoneSample>(
-                    predicate: #Predicate { $0.metricID == id },
-                    sortBy: [SortDescriptor(\.startDate, order: .reverse)]
-                )
-                descriptor.fetchLimit = 1
-                latest = (try? modelContext.fetch(descriptor))?.first
-            }
-
-            var earliest: Date?
-            if count > 0 {
-                var descriptor = FetchDescriptor<PhoneSample>(
-                    predicate: #Predicate { $0.metricID == id },
-                    sortBy: [SortDescriptor(\.startDate, order: .forward)]
-                )
-                descriptor.fetchLimit = 1
-                earliest = (try? modelContext.fetch(descriptor))?.first?.startDate
-            }
-
-            return PhoneMetricSummary(metricID: id,
-                                      count: count,
-                                      latestDate: latest?.startDate,
-                                      latestValue: latest?.value,
-                                      latestCategoryValue: latest?.categoryValue,
-                                      earliestDate: earliest)
-        }
-    }
-
-    func totalSampleCount() throws -> Int {
-        try modelContext.fetchCount(FetchDescriptor<PhoneSample>())
-    }
-
-    func rollupCount() throws -> Int {
-        try modelContext.fetchCount(FetchDescriptor<PhoneRollup>())
-    }
-
-    func oldestSampleDate() throws -> Date? {
-        var descriptor = FetchDescriptor<PhoneSample>(sortBy: [SortDescriptor(\.startDate, order: .forward)])
-        descriptor.fetchLimit = 1
-        return try modelContext.fetch(descriptor).first?.startDate
-    }
-
-    func newestSampleDate() throws -> Date? {
-        var descriptor = FetchDescriptor<PhoneSample>(sortBy: [SortDescriptor(\.startDate, order: .reverse)])
-        descriptor.fetchLimit = 1
-        return try modelContext.fetch(descriptor).first?.startDate
-    }
-
-    /// 本机最后一次收到数据的时间。用 `receivedAt` 而不是 `startDate`：
-    /// 后者是采样时间，无法回答"传输链路还活着吗"。
-    func lastReceivedAt() throws -> Date? {
-        var descriptor = FetchDescriptor<PhoneSample>(sortBy: [SortDescriptor(\.receivedAt, order: .reverse)])
-        descriptor.fetchLimit = 1
-        return try modelContext.fetch(descriptor).first?.receivedAt
-    }
-}

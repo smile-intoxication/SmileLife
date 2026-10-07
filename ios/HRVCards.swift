@@ -407,21 +407,21 @@ private struct BalanceScatterChart: View {
 /// 近 7 天的交感 / 副交感归一化「河流图」。
 ///
 /// ## 画法
-/// 每小时一根**堆叠柱**：HF（副交感，蓝）从 0 堆起，LF（交感，红）叠在上面。
-/// 两者之和恒为 100，所以整条带子的**高度恒定**，看起来就是一条河。
-/// （真正的 stream graph 基线会上下摆动，但那只是为了好看 —— 只有两个分量、
-/// 且和恒为 100 时，直堆叠信息量一样而更好读。）
+/// **每条序列占图上一个位置**（不平均、不聚合）：HF（副交感，蓝）从 0 铺到 `hfNorm`，
+/// LF（交感，红）再往上铺到 100。两者之和恒为 100，所以**整条带子的高度恒定**，
+/// 只有中间那条界线在起伏 —— 那条界线的位置就是"交感/副交感的平衡点"。
 ///
-/// ## ⚠️ 两件必须说清楚的事（都写在界面上）
-/// 1. **没有数据的整点不画柱子** —— 不补 0、不插值。序列之间隔着几十分钟到几小时，
-///    连起来等于**伪造连续性**。「断口」本身就是信息：它说明那段时间没有记录。
-/// 2. **每个点是那一小时的平均**，而均值也有不确定度：实测单条约 40 秒散布 22%、
-///    平均 5 条 10%、平均 10 条 7%。所以界面上要能看到条数。
+/// ## ⚠️ 它和参考图**长得不完全一样，原因是数学上的**
+/// 需求方给的那张河流图有 **6 个分量**、各分量之和随时间变化，所以带子有粗有细；
+/// 我们只有两个分量、**和恒为 100**，所以带子必然是等高的。
+/// 要做出"有粗细"的效果只能再加一个分量（例如 VLF）——
+/// 而 VLF 在 1 分钟的记录上**不可用**（实测真值 450 时只测出 55，差 8 倍）。
+/// **不能为了好看去凑一个分量。**
 struct HRVTrendCard: View {
 
     @ObservedObject private var status = LinkStatus.shared
 
-    @State private var buckets: [HRVTrendBucket] = []
+    @State private var trend: HRVTrend?
     @State private var isLoading = true
 
     /// 画几天。**刻意固定 7 天、不跟页面上那个范围控件联动** ——
@@ -431,16 +431,16 @@ struct HRVTrendCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            if buckets.count >= 2 {
-                chart
-                legend
-                footnote
+            if let trend, trend.points.count >= 2 {
+                river(trend)
+                legend(trend)
+                notes(trend)
             } else if isLoading {
                 Text("正在读取近 \(days) 天的心跳序列…")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
-                Text("近 \(days) 天还没有够画这张图的序列（至少需要 2 个有数据的整点）。")
+                Text("近 \(days) 天还没有够画这张图的序列（至少 2 条达到归一化门槛的）。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -452,7 +452,7 @@ struct HRVTrendCard: View {
 
     private func load() async {
         let store = PhoneServices.shared.store
-        buckets = (try? await store.hrvNormTrend(days: days)) ?? []
+        trend = try? await store.hrvNormTrend(days: days)
         isLoading = false
     }
 
@@ -464,23 +464,25 @@ struct HRVTrendCard: View {
                 Text("近 \(days) 天自主神经平衡（河流图）")
                     .font(.headline)
             }
-            Text("每小时一根柱子，是那一小时里所有序列的**平均**归一化功率。")
+            Text("**每条序列一个位置**，不取平均。带状的高度恒定，起伏的是交感/副交感的平衡点。")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
     }
 
-    private var chart: some View {
+    private func river(_ trend: HRVTrend) -> some View {
         Chart {
-            ForEach(buckets) { bucket in
-                BarMark(x: .value("时间", bucket.hourStart, unit: .hour),
-                        y: .value("HF 归一化", bucket.hfNorm),
-                        width: .ratio(0.85))
-                    .foregroundStyle(Color.blue.opacity(0.75))
-                BarMark(x: .value("时间", bucket.hourStart, unit: .hour),
-                        y: .value("LF 归一化", bucket.lfNorm),
-                        width: .ratio(0.85))
-                    .foregroundStyle(Color.red.opacity(0.75))
+            ForEach(trend.points) { point in
+                AreaMark(x: .value("时间", point.date),
+                         yStart: .value("底", 0),
+                         yEnd: .value("副交感 HF", point.hfNorm))
+                    .foregroundStyle(Color.blue.opacity(0.7))
+                    .interpolationMethod(.catmullRom)
+                AreaMark(x: .value("时间", point.date),
+                         yStart: .value("副交感 HF", point.hfNorm),
+                         yEnd: .value("顶", 100))
+                    .foregroundStyle(Color.red.opacity(0.7))
+                    .interpolationMethod(.catmullRom)
             }
         }
         .chartYScale(domain: 0...100)
@@ -488,12 +490,12 @@ struct HRVTrendCard: View {
         .frame(height: 180)
     }
 
-    private var legend: some View {
+    private func legend(_ trend: HRVTrend) -> some View {
         HStack(spacing: 14) {
-            legendItem(color: .red.opacity(0.75), text: "交感 LF")
-            legendItem(color: .blue.opacity(0.75), text: "副交感 HF")
+            legendItem(color: .red.opacity(0.7), text: "交感 LF")
+            legendItem(color: .blue.opacity(0.7), text: "副交感 HF")
             Spacer(minLength: 6)
-            Text("共 \(buckets.count) 个整点")
+            Text("\(trend.points.count) 条序列")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -508,17 +510,15 @@ struct HRVTrendCard: View {
         }
     }
 
-    private var footnote: some View {
+    private func notes(_ trend: HRVTrend) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("**断口是真实的**：没有数据的整点不画柱子 —— 不补 0、也不连线。序列之间隔着几十分钟到几小时，连起来会伪造成「一直在测」。")
-            Text("**每个点是一小时的平均**，条数少时均值本身不稳（实测：单条约 40 秒散布 22%、平均 5 条 10%、平均 10 条 7%）。最多的一小时有 \(maxSeriesCount) 条。")
-            Text("**看趋势有效，绝对值不能当临床数字**：我们的 LF Norm 系统性偏低约 3 个百分点，而且各种长度下都一样 —— 所以横向比较有意义，具体数值没意义。")
+            Text("**相邻两点之间可能隔着几十分钟到几小时** —— 带状是插值出来的，不是一段连续记录。这张图看的是「一串测量值的走势」，不是「一条连续的曲线」。")
+            if trend.skippedShort > 0 || trend.skippedInconsistent > 0 {
+                Text("另有 **\(trend.skippedShort) 条**不足 \(trend.minimumIntervals) 个 NN 间期、**\(trend.skippedInconsistent) 条**数据不自洽，没画进去 —— 那些时段不等于「没记录」。")
+            }
+            Text("**看趋势有效，绝对值不能当临床数字**：我们的 LF Norm 系统性偏低约 3 个百分点，而且记录长短都一样 —— 所以横向比较有意义，具体数值没意义。")
         }
         .font(.caption2)
         .foregroundStyle(.tertiary)
-    }
-
-    private var maxSeriesCount: Int {
-        buckets.map(\.seriesCount).max() ?? 0
     }
 }
