@@ -155,8 +155,21 @@ struct HeartbeatHRVCard: View {
         sectionTitle("功率谱密度（Δf = \(format(result.frequencyResolution, 4)) Hz）")
         SpectrumChart(points: result.spectrum)
 
-        sectionTitle("交感 / 副交感（LF / HF 功率）")
-        LFHFBarChart(lf: result.lfPower ?? 0, hf: result.hfPower ?? 0)
+        // 🔴 「交感 / 副交感」这一对**必须用归一化值（nU）**，不能用绝对功率（ms²）。
+        // 需求方指出过这一点，而且是对的：绝对功率的单位是 ms²，
+        // 两者相除才是"平衡"，直接比高度等于在比两个不同量纲的数。
+        // 详见 `LFHFBarChart` 的说明。
+        if let lfNorm = result.lfNorm, let hfNorm = result.hfNorm {
+            sectionTitle("交感 / 副交感（LF / HF 归一化功率，nU）")
+            LFHFBarChart(lfNorm: lfNorm, hfNorm: hfNorm)
+        } else {
+            sectionTitle("交感 / 副交感")
+            Text("归一化值需要 ≥\(normalizedMinimumIntervals) 个 NN 间期"
+                 + "（现有 \(result.nnMillis.count)）—— **绝对功率不能当交感/副交感之比看**，"
+                 + "所以这里不画。下面是谱和平衡散点，那两张不依赖归一化。")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
 
         sectionTitle("自主神经平衡（横轴 LF、纵轴 HF，取自然对数）")
         BalanceScatterChart(lfLn: ln(result.lfPower), hfLn: ln(result.hfPower))
@@ -165,6 +178,14 @@ struct HeartbeatHRVCard: View {
     private func ln(_ value: Double?) -> Double? {
         guard let value, value > 0 else { return nil }
         return log(value)
+    }
+
+    /// 归一化值的门槛**从 `HRVMetrics` 取**，不在这里写死。
+    ///
+    /// 写死的话"界面文案里说的门槛"和"实际用来判断的门槛"会各说一套 ——
+    /// 而这两者一旦不一致，用户会看到"说是需要 2 分钟、可我有 2 分钟了还是没出来"。
+    private var normalizedMinimumIntervals: Int {
+        HRVMetrics.metric(id: "lf_norm")?.minimumIntervals ?? 120
     }
 
     // MARK: 说明
@@ -264,6 +285,14 @@ private struct BeatWaveformChart: View {
 private struct RRHistogramChart: View {
     let bins: [RRHistogramBin]
 
+    /// 条数轴的**固定上限**（需求方指定）。
+    ///
+    /// 刻意**不按数据自适应**：自适应的纵轴会让"50 拍的一条序列"和"300 拍的一条序列"
+    /// 看起来一样高 —— 而这张图的用途正是**跨序列比较分布形状**。
+    /// ⚠️ 代价：条数超过 20 的柱子会被**截平**。这是有意的取舍
+    /// （上限固定才可比），真出现那种情况应当看下面的"能算的指标"而不是这张图。
+    private let countLimit: Double = 20
+
     var body: some View {
         Chart(bins) { bin in
             BarMark(x: .value("RR", bin.lowerBound),
@@ -271,6 +300,7 @@ private struct RRHistogramChart: View {
                     width: .fixed(18))
                 .foregroundStyle(Color.blue.gradient)
         }
+        .chartYScale(domain: 0...countLimit)
         .chartXAxisLabel("RR 间期（ms）")
         .frame(height: 150)
     }
@@ -306,9 +336,21 @@ private struct SpectrumChart: View {
 // MARK: - 交感 / 副交感
 
 /// 参考报告里那两根柱子（LF 红、HF 蓝）。
+///
+/// ## 🔴 为什么必须用**归一化值（nU）**，不能用绝对功率（ms²）
+/// 需求方指出过这一点，而且是对的。参考报告那张图的表里就写着
+/// **`LF Norm 65.403 nU` / `HF Norm 34.597 nU`** —— 两根柱子画的正是这两个数。
+///
+/// 理由是**量纲**：绝对功率的单位是 ms²，而 LF 和 HF 的绝对值受
+/// 总功率、呼吸深度、体位等一堆因素影响，两个数直接比高度，
+/// 等于在比"两个不同量纲的数谁大"。归一化之后它们**加起来恒等于 100**，
+/// 于是两根柱子表示的才是"**平衡**"—— 那才是"交感 / 副交感"这张图要说的东西。
+///
+/// ⚠️ 归一化值的门槛比绝对功率更高（≥2 分钟），达不到时上层**不画这张图**，
+/// 而不是退回绝对功率 —— 因为那会把结论讲错。
 private struct LFHFBarChart: View {
-    let lf: Double
-    let hf: Double
+    let lfNorm: Double
+    let hfNorm: Double
 
     private struct Bar: Identifiable {
         var id: String { label }
@@ -320,15 +362,17 @@ private struct LFHFBarChart: View {
     var body: some View {
         Chart(bars) { bar in
             BarMark(x: .value("频带", bar.label),
-                    y: .value("功率", bar.value))
+                    y: .value("归一化功率", bar.value))
                 .foregroundStyle(bar.tint)
         }
+        .chartYScale(domain: 0...100)
+        .chartYAxisLabel("nU")
         .frame(height: 150)
     }
 
     private var bars: [Bar] {
-        [Bar(label: "LF（交感）", value: lf, tint: .red.opacity(0.7)),
-         Bar(label: "HF（副交感）", value: hf, tint: .blue.opacity(0.7))]
+        [Bar(label: "LF（交感）", value: lfNorm, tint: .red.opacity(0.7)),
+         Bar(label: "HF（副交感）", value: hfNorm, tint: .blue.opacity(0.7))]
     }
 }
 

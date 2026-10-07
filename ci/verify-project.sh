@@ -823,6 +823,29 @@ else
   bad "HeartbeatHRVCard 没有出现在 ChartView 里 —— 写了但没人用"
 fi
 
+# —— 「交感 / 副交感」必须用**归一化值（nU）**，不能用绝对功率（ms²）——
+# 需求方指出过一次，而且我一开始确实写错了。绝对功率受总功率、呼吸深度、体位影响，
+# **两个 ms² 的数直接比高度 = 在比两个不同量纲的数谁大**。
+# 参考报告那张图的表里写的本来就是 `LF Norm 65.403 nU` / `HF Norm 34.597 nU`；
+# 归一化后两者**加起来恒为 100**，两根柱子表示的才是"平衡"。
+# 判据用**参数标签**（lfNorm:/hfNorm: vs lfPower:/hfPower:）—— 精确且不会误伤文案。
+if grep -qE 'LFHFBarChart\((lf|hf)Norm:' ios/HRVCards.swift 2>/dev/null; then
+  ok "交感/副交感柱状图用的是归一化值（nU）"
+else
+  bad "交感/副交感柱状图没用归一化值 —— 绝对功率（ms²）不能当交感/副交感之比看"
+fi
+if grep -qE 'LFHFBarChart\((lf|hf)Power:' ios/HRVCards.swift 2>/dev/null; then
+  bad "交感/副交感柱状图传了绝对功率（ms²）—— 必须用归一化值 nU"
+fi
+
+# —— 直方图的条数轴必须是**固定上限** ——
+# 需求方指定固定 20。自适应纵轴会让"50 拍的一条序列"和"300 拍的一条序列"
+# 看起来一样高，而这张图的用途正是跨序列比较分布形状。
+if grep -q 'chartYScale(domain: 0\.\.\.countLimit)' ios/HRVCards.swift 2>/dev/null; then
+  ok "直方图条数轴是固定上限（跨序列可比）"
+else
+  bad "直方图条数轴没有固定上限 —— 自适应会让不同拍数的序列看起来一样高"
+fi
 # —— 视图层不许做生理单位换算 ——
 # 需求方明确纠正过一次：波形图要画**心跳序列本身（RR 间期 ms）**，
 # 而不是它的换算结果（瞬时心率 BPM = 60000 ÷ RR）。
