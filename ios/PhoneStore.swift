@@ -403,6 +403,30 @@ actor PhoneStore {
         return RRSeriesFetch(series: series, isTruncated: records.count >= seriesLimit)
     }
 
+    /// 取**最新一条**序列（波形图 + 单序列 HRV 分析用）。
+    ///
+    /// ⚠️ 刻意不复用 `rrSeries`：那个是"时间范围内**最早**的前 N 条"，
+    /// 而这里要的是"**最近**那一条" —— 两者在范围边界上的语义不同。
+    ///
+    /// 往前多取几条是为了**跳过不自洽的记录**（拍数与时间戳个数对不上），
+    /// 而不是"取最新那条、如果它是坏的就算了" —— 那会让图表莫名其妙地空掉，
+    /// 而"空"会被读成"没有数据"。
+    func latestRRSeries() throws -> RRSeriesData? {
+        var descriptor = FetchDescriptor<PhoneHeartbeatSeries>(
+            sortBy: [SortDescriptor(\.startDate, order: .reverse)]
+        )
+        descriptor.fetchLimit = 8
+
+        for record in try modelContext.fetch(descriptor) {
+            guard record.isSelfConsistent else { continue }
+            return RRSeriesData(seriesUUID: record.uuid,
+                                startDate: record.startDate,
+                                beatOffsetsMillis: record.beatOffsetsMillis,
+                                gapFlags: record.gapFlags)
+        }
+        return nil
+    }
+
     // MARK: - 读取：概览与状态
 
     /// 每个指标的最新值 / 总条数 / 时间范围。

@@ -770,6 +770,66 @@ else
   bad "同步引擎没有用 canAdvanceAnchor 保护游标落盘 —— 未授权时推进游标会永久丢历史且零报错"
 fi
 
+echo
+echo "== 17. HRV：指标注册表与门槛的一致性"
+# HRV 的指标定义在 `HRVMetrics.all`，取值在 `HRVResult.value(for:)` 的 switch 里。
+# 两处漏一个的后果**不同、但都静默**：
+#   · 表里有、switch 里没有 → 界面上那一行永远是「—」，看起来像"没有数据"
+#   · switch 里有、表里没有 → 那个值算出来了却**永远不显示**（白算）
+# 所以必须**双向**一致。
+#
+# ⚠️ **字符类必须含数字**（`[a-z0-9_]+`）。第一版写的是 `[a-z_]+`，于是
+# `sd1` `sd2` `pnn20` `pnn50` **四个指标被静默漏掉** —— 而两个集合被同一个正则
+# 同时截断，所以守卫照样报"双向一致"，**是一次假通过**。
+# 一个会悄悄漏掉部分输入的守卫，比没有守卫更糟。
+HRV_REG=$(grep -oE 'id: "[a-z0-9_]+"' ios/HRVAnalysis.swift 2>/dev/null | sed 's/id: "//;s/"//' | sort -u)
+HRV_SWITCH=$(code_only ios/HRVAnalysis.swift | grep -oE 'case "[a-z0-9_]+":' | sed 's/case "//;s/"://' | sort -u)
+if [ -z "$HRV_REG" ] || [ -z "$HRV_SWITCH" ]; then
+  bad "没能从 ios/HRVAnalysis.swift 提取 HRV 指标表或取值 switch（结构变了？）"
+else
+  # —— 元守卫：提取到的条数必须等于**声明处**的条数 ——
+  # 否则就是"提取正则漏了"，而不是"表漏了"。这两种情况的修法完全不同，
+  # 而且前者会让下面的一致性检查**永远通过**。
+  HRV_DECLARED=$(grep -c 'HRVMetric(id:' ios/HRVAnalysis.swift)
+  HRV_FOUND=$(printf '%s\n' "$HRV_REG" | wc -l | tr -d ' ')
+  if [ "$HRV_DECLARED" != "$HRV_FOUND" ]; then
+    bad "提取到 $HRV_FOUND 个指标 id，但文件里有 $HRV_DECLARED 个 HRVMetric —— **提取正则漏了**，一致性检查不可信"
+  else
+    ok "指标 id 提取完整（$HRV_FOUND 个，与声明数一致）"
+  fi
+  ONLY_REG=$(comm -23 <(printf '%s\n' "$HRV_REG") <(printf '%s\n' "$HRV_SWITCH") | tr '\n' ' ')
+  ONLY_SW=$(comm -13 <(printf '%s\n' "$HRV_REG") <(printf '%s\n' "$HRV_SWITCH") | tr '\n' ' ')
+  if [ -z "$ONLY_REG" ] && [ -z "$ONLY_SW" ]; then
+    ok "HRV 指标表与取值 switch 双向一致（$HRV_FOUND 个指标）"
+  else
+    [ -n "$ONLY_REG" ] && bad "HRVMetrics 里有、取值 switch 里没有（会永远显示「—」）：$ONLY_REG"
+    [ -n "$ONLY_SW" ] && bad "取值 switch 里有、HRVMetrics 里没有（算出来却永远不显示）：$ONLY_SW"
+  fi
+fi
+
+# 门槛**必须真的被界面用到** —— 否则"不给不成立的数字"就只是注释里的愿望。
+# 这条守的是一个很容易发生的退化：有人把 partition 换成"全列出来"，
+# 于是一段 40 秒的序列又开始显示 VLF 和 LF/HF，而且没有任何报错。
+if grep -q 'HRVMetrics\.partition' ios/HRVCards.swift 2>/dev/null; then
+  ok "界面按门槛过滤（HRVMetrics.partition）—— 不成立的指标不会显示数值"
+else
+  bad "HRVCards 没有调用 HRVMetrics.partition —— 门槛成了摆设，短序列会照出频域数字"
+fi
+
+# 卡片得真的接进图表页，否则整块是死代码
+if grep -q 'HeartbeatHRVCard()' ios/ChartView.swift 2>/dev/null; then
+  ok "HRV 卡片已接进图表页"
+else
+  bad "HeartbeatHRVCard 没有出现在 ChartView 里 —— 写了但没人用"
+fi
+
+# 频域算法是**本地验证过**的（手写 FFT 与朴素 DFT 对照、频带功率对已知信号），
+# 验证脚本不能丢 —— 丢了就没人能复核"频带积分有没有少乘 Δf"这类不出声的错误。
+if ls ci/hrv_check*.py >/dev/null 2>&1; then
+  ok "HRV 算法的本地验证脚本还在（ci/hrv_check*.py）"
+else
+  bad "缺少 ci/hrv_check*.py —— 频域算法的可复核证据丢了"
+fi
 # ---------- 汇总 ----------
 printf '\n== 汇总：%d 通过，%d 失败\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

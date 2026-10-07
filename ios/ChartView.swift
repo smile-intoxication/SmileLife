@@ -702,6 +702,13 @@ struct ChartView: View {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     rangePicker
 
+                    // 单序列 HRV 分析（波形图 + 时域 + 频域）。
+                    // **只在真的收到过心跳序列时出现** —— 这条链路依赖手表产生
+                    // `HKHeartbeatSeriesSample`，留一个永远为空的入口比没有入口更糟。
+                    if heartbeatSeriesCount > 0 {
+                        HeartbeatHRVCard()
+                    }
+
                     ForEach(populatedItems) { item in
                         MetricChartCard(item: item, range: range)
                     }
