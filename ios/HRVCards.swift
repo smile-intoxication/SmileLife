@@ -13,14 +13,23 @@ import Charts
 //
 // 这一条是本项目的底线：**"表能填出来"不等于"这个结论成立"**。
 
-/// 波形图上的一个点：第 i 拍的**瞬时心率**。
+/// 波形图上的一个点：第 i 个 **RR 间期**。
 ///
-/// 用瞬时心率（60000/RR）而不是 RR 来画纵轴，是为了对齐需求方给的参考报告
-/// （那张"心率变异波形图"的纵轴是 BPM）。两者是同一份信息的倒数关系。
+/// ## 纵轴为什么是 ms 而不是 BPM
+/// 需求方给的参考报告里那张「心率变异波形图」纵轴是 BPM，所以第一版照抄了 BPM。
+/// 但需求方随后明确纠正：**要画的是心跳序列本身，也就是 RR 间期**
+/// （`HKHeartbeatSeriesSample` → 逐拍时间戳 → 相邻相减）。
+///
+/// BPM 是 `60000 ÷ RR` 的**换算结果**：换过去只多一层加工，
+/// 而且会让人以为数据源是"心率样本"（`HKQuantityTypeIdentifierHeartRate`）——
+/// 那是**另一套数据**，和心跳序列不是一回事。
+///
+/// 两者是倒数关系，所以纵轴换回 ms 不丢信息；
+/// 而"心率"该出现的地方是指标表里的**平均心率**（它本来就在那儿）。
 private struct BeatPoint: Identifiable {
     let id: Int
     let seconds: Double
-    let bpm: Double
+    let rrMillis: Double
 }
 
 struct HeartbeatHRVCard: View {
@@ -36,8 +45,8 @@ struct HeartbeatHRVCard: View {
             header
 
             if let result, !result.nnMillis.isEmpty {
-                BeatWaveformChart(points: beatPoints(result),
-                                  meanBPM: result.meanHR)
+                sectionTitle("逐拍 RR 间期（心跳序列本身）")
+                BeatWaveformChart(points: beatPoints(result), meanRR: result.meanRR)
                 metricsSection(result)
                 if result.histogram.count >= 2 {
                     sectionTitle("RR 间期直方图")
@@ -85,7 +94,7 @@ struct HeartbeatHRVCard: View {
             HStack(spacing: 8) {
                 Image(systemName: "waveform.path.ecg")
                     .foregroundStyle(.purple)
-                Text("最新一条心率序列（HRV）")
+                Text("最新一条心跳序列（HRV）")
                     .font(.headline)
             }
             if let startDate {
@@ -108,7 +117,7 @@ struct HeartbeatHRVCard: View {
             guard pair.1 > 0 else { return nil }
             return BeatPoint(id: index,
                              seconds: Double(pair.0 - base) / 1000.0,
-                             bpm: 60_000.0 / pair.1)
+                             rrMillis: pair.1)
         }
     }
 
@@ -163,8 +172,10 @@ struct HeartbeatHRVCard: View {
     @ViewBuilder
     private func notes(_ result: HRVResult) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("纵轴是**瞬时心率**（60000 ÷ RR），红线是平均值 —— 和参考报告的"
-                 + "「心率变异波形图」一致；RR 间期是它的倒数关系。")
+            Text("纵轴是 **RR 间期（ms）**，红线是平均值 —— 画的就是拿到的心跳序列本身。"
+                 + "参考报告那张「心率变异波形图」用的是它的倒数（BPM = 60000 ÷ RR），"
+                 + "同一份信息；这里用 ms，因为那是逐拍时间戳**直接**给出的量。"
+                 + "「平均心率」在下面的指标表里。")
             Text("短记录的频域指标**波动极大**：同一段生理信号，40 秒窗口的 LF/HF "
                  + "有 90% 的把握落在 3.0~11.8 之间（300 秒窗口才是 4.6~6.9）。"
                  + "所以这里对不够长的序列只画谱、不报数。")
@@ -219,27 +230,31 @@ private struct HRVMetricRow: View {
 
 // MARK: - 波形图
 
-/// 「心率变异波形图」：逐拍瞬时心率 + 平均值参考线。
+/// 逐拍 RR 间期波形图（心跳序列本身）。
+///
+/// 纵轴是 **RR 间期（ms）**，红线是平均 RR。
+/// 参考报告那张「心率变异波形图」纵轴用的是 BPM —— 那是本图的倒数视角，
+/// 同一份信息；这里画 ms，因为那才是心跳序列**直接**给出的量。
 private struct BeatWaveformChart: View {
     let points: [BeatPoint]
-    let meanBPM: Double?
+    let meanRR: Double?
 
     var body: some View {
         Chart {
             ForEach(points) { point in
                 LineMark(x: .value("时间", point.seconds),
-                         y: .value("瞬时心率", point.bpm))
+                         y: .value("RR 间期", point.rrMillis))
                     .foregroundStyle(Color.purple)
                     .interpolationMethod(.linear)
             }
-            if let meanBPM {
-                RuleMark(y: .value("平均心率", meanBPM))
+            if let meanRR {
+                RuleMark(y: .value("平均 RR", meanRR))
                     .foregroundStyle(Color.red.opacity(0.7))
                     .lineStyle(StrokeStyle(lineWidth: 1))
             }
         }
         .chartXAxisLabel("秒")
-        .chartYAxisLabel("BPM")
+        .chartYAxisLabel("RR 间期 (ms)")
         .frame(height: 200)
     }
 }
