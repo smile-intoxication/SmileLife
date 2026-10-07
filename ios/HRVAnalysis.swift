@@ -63,15 +63,19 @@ enum HRVMetrics {
         HRVMetric(id: "lf_power", title: "LF 功率", unit: "ms²",
                   minimumIntervals: 120,
                   rationale: "LF 带宽只有 0.11Hz，40 秒时带内约 4 个频点，太粗"),
+        // ⚠️ **LF/HF 和 LF Norm 的门槛刻意不同，因为实测下来它们的行为差得很远**：
+        // · LF/HF 是**无上界的比值** —— 分母一小就爆掉，40 秒时 5%~95% 是 3.0~11.8（散布 152%）
+        // · LF Norm 有界（0~100），40 秒时 5%~95% 是 ±11 个百分点（散布 22%）
+        // 把两者当成一回事、都给 120，是我一开始的错误（`ci/hrv_check_hourly.py` 量的）。
         HRVMetric(id: "lf_hf", title: "LF/HF", unit: "",
                   minimumIntervals: 120,
-                  rationale: "实测：40 秒时同一段信号的 5%~95% 是 3.0~11.8（散布 152%），报一个数会误导"),
+                  rationale: "**无上界的比值**，实测 40 秒时 5%~95% 是 3.0~11.8（散布 152%），报一个数会误导"),
         HRVMetric(id: "lf_norm", title: "LF Norm", unit: "nU",
-                  minimumIntervals: 120,
-                  rationale: "归一化量，分母不稳它就不稳"),
+                  minimumIntervals: 40,
+                  rationale: "有界量，实测 40 秒时 5%~95% 是 ±11 个百分点（散布 22%）—— 看趋势有效，绝对值偏低约 3pp"),
         HRVMetric(id: "hf_norm", title: "HF Norm", unit: "nU",
-                  minimumIntervals: 120,
-                  rationale: "同上"),
+                  minimumIntervals: 40,
+                  rationale: "与 LF Norm 互补（两者和为 100），门槛相同"),
         HRVMetric(id: "vlf_power", title: "VLF 功率", unit: "ms²",
                   minimumIntervals: 300,
                   rationale: "VLF 上限周期 300 秒，**装不进更短的窗口**。实测真值 450 时 40 秒只测出 55（差 8 倍）"),
@@ -261,6 +265,19 @@ struct HRVResult: Sendable {
     }
 }
 
+/// 「河流图」用的一个整点桶：那一小时里所有序列的 LF/HF 归一化**均值**。
+struct HRVTrendBucket: Identifiable, Sendable {
+    var id: Double { hourStart.timeIntervalSince1970 }
+    let hourStart: Date
+    let lfNorm: Double
+    let hfNorm: Double
+    /// 这一小时里参与平均的序列条数。
+    ///
+    /// **必须显示出来**：均值本身也有不确定度，而条数少的时候那个不确定度很大
+    /// （实测：单条散布 22%、平均 5 条 10%、平均 10 条 7%）。
+    /// 只给一个平均数、不告诉用户它是几条平均出来的，等于把不确定度藏起来。
+    let seriesCount: Int
+}
 // MARK: - 分析器
 
 enum HRVAnalyzer {

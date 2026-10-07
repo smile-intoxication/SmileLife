@@ -896,6 +896,47 @@ if ls ci/hrv_check*.py >/dev/null 2>&1; then
 else
   bad "缺少 ci/hrv_check*.py —— 频域算法的可复核证据丢了"
 fi
+echo
+echo "== 18. 默认时间范围：由采样密度决定（漏了不会报错，只会画成一坨）"
+# 心率全天每 5 秒一条（最坏约 17,000 条/天），7 天就是十几万个点 —— 画出来是一坨。
+# 而**漏掉一个高频指标不会报错**，只会让它按 7 天画，所以这里机械守一下。
+if grep -q 'static func `default`(forMetricID' ios/ChartView.swift 2>/dev/null; then
+  ok "存在「按体征取默认范围」的单一来源（ChartRange.default(forMetricID:)）"
+else
+  bad "找不到 ChartRange.default(forMetricID:) —— 默认范围没有单一来源"
+fi
+MISSING_RANGE=""
+for high_freq in heart_rate resting_heart_rate walking_heart_rate_average; do
+  # 必须出现在 default(forMetricID:) 那个 switch 的 case 列表里
+  if ! awk '/static func `default`\(forMetricID/,/^    }/' ios/ChartView.swift \
+       | grep -q "\"$high_freq\""; then
+    MISSING_RANGE="$MISSING_RANGE $high_freq"
+  fi
+done
+if [ -z "$MISSING_RANGE" ]; then
+  ok "高频心率类指标都在默认范围表里（1 天）"
+else
+  bad "这些高频指标没进默认范围表（会按 7 天画成一坨）：$MISSING_RANGE"
+fi
+
+# 「自动」这一档必须真的被界面用上 —— 否则"按体征取默认"只是摆设
+if grep -q 'effectiveRange(for:' ios/ChartView.swift 2>/dev/null; then
+  ok "图表页确实按体征取有效范围（effectiveRange(for:)）"
+else
+  bad "ChartView 没有调用 effectiveRange(for:) —— 默认范围没被用上"
+fi
+
+# 河流图的三条语义要求
+if grep -q 'hrvNormTrend' ios/PhoneStore.swift 2>/dev/null; then
+  ok "河流图的数据来自整点聚合（PhoneStore.hrvNormTrend）"
+else
+  bad "缺少 PhoneStore.hrvNormTrend —— 河流图没有数据来源"
+fi
+if grep -q 'chartYScale(domain: 0\.\.\.100)' ios/HRVCards.swift 2>/dev/null; then
+  ok "河流图的纵轴固定 0–100 nU（归一化值两者恒和为 100）"
+else
+  bad "河流图纵轴没有固定 0–100 —— 归一化值的和恒为 100，必须固定"
+fi
 # ---------- 汇总 ----------
 printf '\n== 汇总：%d 通过，%d 失败\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

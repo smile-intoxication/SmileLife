@@ -691,7 +691,12 @@ struct ChartView: View {
 
     /// 默认 **7 天**：一天的窗口对多数指标太窄（静息心率一天只有一两个点），
     /// 而更长的窗口在手机上看不清日间波动。其他范围在分段控件里可选。
-    @State private var range: ChartRange = .week
+    /// 页面上的时间范围。`nil` = **「自动」**：每个图用自己体征的默认范围
+    /// （见 `ChartRange.default(forMetricID:)`）。
+    ///
+    /// ⚠️ 这**不是**"每个图各自一个选择器"（那被明确否决过，见 AGENTS.md 原则 6）——
+    /// 页面上仍然只有**一个**分段控件，它只是多了一个"不覆盖"的档。
+    @State private var rangeOverride: ChartRange?
 
     @State private var summaries: [PhoneMetricSummary] = []
     @State private var heartbeatSeriesCount = 0
@@ -709,8 +714,15 @@ struct ChartView: View {
                         HeartbeatHRVCard()
                     }
 
+                    // 近 7 天的交感/副交感归一化"河流图"。
+                    // 它是**跨序列**的，所以不受上面那个范围控件影响（自己固定 7 天）。
+                    if heartbeatSeriesCount > 0 {
+                        HRVTrendCard()
+                    }
+
                     ForEach(populatedItems) { item in
-                        MetricChartCard(item: item, range: range)
+                        MetricChartCard(item: item,
+                                        range: effectiveRange(for: item.id))
                     }
 
                     emptyFootnote
@@ -730,12 +742,37 @@ struct ChartView: View {
     }
 
     private var rangePicker: some View {
-        Picker("时间范围", selection: $range) {
-            ForEach(ChartRange.allCases) { item in
-                Text(item.title).tag(item)
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("时间范围", selection: $rangeOverride) {
+                Text("自动").tag(ChartRange?.none)
+                ForEach(ChartRange.allCases) { item in
+                    Text(item.pickerTitle).tag(ChartRange?.some(item))
+                }
             }
+            .pickerStyle(.segmented)
+
+            Text(rangeCaption)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
-        .pickerStyle(.segmented)
+    }
+
+    /// 当前用的是什么范围、以及为什么。
+    ///
+    /// 把"自动"到底选了什么**写在界面上**，而不是让用户去猜 ——
+    /// 页面上同时存在两种范围（心率 1 天、其他 7 天）时，
+    /// 不解释的话看起来就像 bug。
+    private var rangeCaption: String {
+        if let override = rangeOverride {
+            return "所有图都按「\(override.title)」显示。选「自动」则每种体征用各自的默认范围。"
+        }
+        return "自动：心率、静息心率、步行心率用 24 小时（一天上万个点，7 天画不出日间波动）；"
+             + "其余体征用 7 天。"
+    }
+
+    /// 卡片实际用的范围：用户选过就用用户的，否则用这个体征自己的默认。
+    private func effectiveRange(for metricID: String) -> ChartRange {
+        rangeOverride ?? ChartRange.default(forMetricID: metricID)
     }
 
     /// 列出哪些卡片。
@@ -788,5 +825,47 @@ struct ChartView: View {
         let store = PhoneServices.shared.store
         summaries = (try? await store.metricSummaries()) ?? []
         heartbeatSeriesCount = (try? await store.heartbeatSeriesCount()) ?? 0
+    }
+}
+
+// MARK: - 范围：由体征的采样密度决定
+
+extension ChartRange {
+
+    /// 分段控件里用的短标题。
+    ///
+    /// 单独一个属性而不改 `title`：`title` 在别处是"7 天""24 小时"这种完整说法，
+    /// 而 7 个分段要挤在手机宽度里，只能用最短的写法。
+    var pickerTitle: String {
+        switch self {
+        case .day:      return "1天"
+        case .week:     return "7天"
+        case .month:    return "30天"
+        case .quarter:  return "90天"
+        case .halfYear: return "180天"
+        case .all:      return "全部"
+        }
+    }
+
+    /// 每个体征**自己的**默认范围（页面选「自动」时生效）。
+    ///
+    /// ## 为什么范围也要由数据决定
+    /// 和"图表形态由数据怎么产生决定"（`MetricDisplay.ChartStyle`）是同一条道理 ——
+    /// 默认范围该由**采样密度**决定，不是所有图都 7 天：
+    /// · **心率**全天每 5 秒一条（最坏约 17,000 条/天）。7 天就是十几万个点，
+    ///   画出来是一坨，**连"哪一段在动"都看不出来**；而要看的东西正是日间波动。
+    /// · **静息心率 / 步行心率**每天只有几个点，但它们的意义是"最近的状态"，
+    ///   摊到 7 天反而看不出拐点。
+    /// · 血氧 / 呼吸 / 腕温这些一天测几次的离散点，**7 天才够看出分布** —— 它们保持 7 天。
+    ///
+    /// ⚠️ 漏掉一个高频指标不会报错，只会让它按 7 天画成一坨 —— 所以自检第 18 节
+    /// 会断言这三个心率类指标都在这个表里。
+    static func `default`(forMetricID id: String) -> ChartRange {
+        switch id {
+        case "heart_rate", "resting_heart_rate", "walking_heart_rate_average":
+            return .day
+        default:
+            return .week
+        }
     }
 }

@@ -193,10 +193,9 @@ struct HeartbeatHRVCard: View {
     @ViewBuilder
     private func notes(_ result: HRVResult) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("纵轴是 **RR 间期（ms）**，红线是平均值 —— 画的就是拿到的心跳序列本身。"
-                 + "参考报告那张「心率变异波形图」用的是它的倒数（BPM = 60000 ÷ RR），"
-                 + "同一份信息；这里用 ms，因为那是逐拍时间戳**直接**给出的量。"
-                 + "「平均心率」在下面的指标表里。")
+            // ⚠️ 必须是**单个字符串字面量**：`Text("a" + "b")` 会退化成 `String`，
+            // SwiftUI 就不再按 markdown 解析，`**粗体**` 会**原样显示成星号**。
+            Text("纵轴是 **RR 间期（ms）**，红线是平均值 —— 画的就是拿到的心跳序列本身。参考报告那张「心率变异波形图」用的是它的倒数（BPM = 60000 ÷ RR），同一份信息；这里用 ms，因为那是逐拍时间戳**直接**给出的量。「平均心率」在下面的指标表里。")
             Text("短记录的频域指标**波动极大**：同一段生理信号，40 秒窗口的 LF/HF "
                  + "有 90% 的把握落在 3.0~11.8 之间（300 秒窗口才是 4.6~6.9）。"
                  + "所以这里对不够长的序列只画谱、不报数。")
@@ -400,5 +399,126 @@ private struct BalanceScatterChart: View {
         .chartXAxisLabel("LF (ln)")
         .chartYAxisLabel("HF (ln)")
         .frame(height: 180)
+    }
+}
+
+// MARK: - 近 7 天：交感 / 副交感归一化「河流图」
+
+/// 近 7 天的交感 / 副交感归一化「河流图」。
+///
+/// ## 画法
+/// 每小时一根**堆叠柱**：HF（副交感，蓝）从 0 堆起，LF（交感，红）叠在上面。
+/// 两者之和恒为 100，所以整条带子的**高度恒定**，看起来就是一条河。
+/// （真正的 stream graph 基线会上下摆动，但那只是为了好看 —— 只有两个分量、
+/// 且和恒为 100 时，直堆叠信息量一样而更好读。）
+///
+/// ## ⚠️ 两件必须说清楚的事（都写在界面上）
+/// 1. **没有数据的整点不画柱子** —— 不补 0、不插值。序列之间隔着几十分钟到几小时，
+///    连起来等于**伪造连续性**。「断口」本身就是信息：它说明那段时间没有记录。
+/// 2. **每个点是那一小时的平均**，而均值也有不确定度：实测单条约 40 秒散布 22%、
+///    平均 5 条 10%、平均 10 条 7%。所以界面上要能看到条数。
+struct HRVTrendCard: View {
+
+    @ObservedObject private var status = LinkStatus.shared
+
+    @State private var buckets: [HRVTrendBucket] = []
+    @State private var isLoading = true
+
+    /// 画几天。**刻意固定 7 天、不跟页面上那个范围控件联动** ——
+    /// 它是"长期累计"视角，和"单个体征的时间范围"是两件事。
+    private let days = 7
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            if buckets.count >= 2 {
+                chart
+                legend
+                footnote
+            } else if isLoading {
+                Text("正在读取近 \(days) 天的心跳序列…")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("近 \(days) 天还没有够画这张图的序列（至少需要 2 个有数据的整点）。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 16))
+        .task(id: status.dataVersion) { await load() }
+    }
+
+    private func load() async {
+        let store = PhoneServices.shared.store
+        buckets = (try? await store.hrvNormTrend(days: days)) ?? []
+        isLoading = false
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Image(systemName: "water.waves")
+                    .foregroundStyle(.purple)
+                Text("近 \(days) 天自主神经平衡（河流图）")
+                    .font(.headline)
+            }
+            Text("每小时一根柱子，是那一小时里所有序列的**平均**归一化功率。")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private var chart: some View {
+        Chart {
+            ForEach(buckets) { bucket in
+                BarMark(x: .value("时间", bucket.hourStart, unit: .hour),
+                        y: .value("HF 归一化", bucket.hfNorm),
+                        width: .ratio(0.85))
+                    .foregroundStyle(Color.blue.opacity(0.75))
+                BarMark(x: .value("时间", bucket.hourStart, unit: .hour),
+                        y: .value("LF 归一化", bucket.lfNorm),
+                        width: .ratio(0.85))
+                    .foregroundStyle(Color.red.opacity(0.75))
+            }
+        }
+        .chartYScale(domain: 0...100)
+        .chartYAxisLabel("nU")
+        .frame(height: 180)
+    }
+
+    private var legend: some View {
+        HStack(spacing: 14) {
+            legendItem(color: .red.opacity(0.75), text: "交感 LF")
+            legendItem(color: .blue.opacity(0.75), text: "副交感 HF")
+            Spacer(minLength: 6)
+            Text("共 \(buckets.count) 个整点")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func legendItem(color: Color, text: String) -> some View {
+        HStack(spacing: 5) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(color)
+                .frame(width: 10, height: 10)
+            Text(text).font(.caption2)
+        }
+    }
+
+    private var footnote: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("**断口是真实的**：没有数据的整点不画柱子 —— 不补 0、也不连线。序列之间隔着几十分钟到几小时，连起来会伪造成「一直在测」。")
+            Text("**每个点是一小时的平均**，条数少时均值本身不稳（实测：单条约 40 秒散布 22%、平均 5 条 10%、平均 10 条 7%）。最多的一小时有 \(maxSeriesCount) 条。")
+            Text("**看趋势有效，绝对值不能当临床数字**：我们的 LF Norm 系统性偏低约 3 个百分点，而且各种长度下都一样 —— 所以横向比较有意义，具体数值没意义。")
+        }
+        .font(.caption2)
+        .foregroundStyle(.tertiary)
+    }
+
+    private var maxSeriesCount: Int {
+        buckets.map(\.seriesCount).max() ?? 0
     }
 }

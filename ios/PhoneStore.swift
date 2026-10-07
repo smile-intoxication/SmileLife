@@ -426,6 +426,55 @@ actor PhoneStore {
         }
         return nil
     }
+    /// 近 N 天**每小时**的 LF / HF 归一化均值（"河流图"用）。
+    ///
+    /// ## 为什么按小时聚合，而不是每条序列一个点
+    /// 每条序列只覆盖约 1 分钟。7 天里几十上百条这样的细条摊在同一条横轴上，
+    /// 会**全部塌成像素点**，什么也看不出来。按小时聚成均值才有一条能读的"河"。
+    ///
+    /// ## 为什么短序列可以做均值（而单条序列的门槛更高）
+    /// **平均能降方差 —— Welch 法的核心就是这个。** 实测（`ci/hrv_check_hourly.py`）：
+    /// 单条约 40 秒的 LF Norm 5%~95% 散布 **22%**；平均 5 条降到 **10%**、
+    /// 平均 10 条降到 **7%**（相当于一条 300 秒记录）。
+    /// ⚠️ 但**偏差修不掉**：我们的 LF Norm 系统性偏低约 **3 个百分点**，
+    /// 而且**各种长度下都一样** —— 所以**看趋势有效，绝对值不能当临床数字读**。
+    ///
+    /// ## ⚠️ 没有数据的整点**不出现在结果里**
+    /// 刻意不补 0、不做插值：序列之间隔着几十分钟到几小时，
+    /// 把它们连起来等于**伪造连续性**。出图时那些位置就是**空的**。
+    func hrvNormTrend(days: Int) throws -> [HRVTrendBucket] {
+        let cutoff = Date().addingTimeInterval(-Double(days) * 24 * 3600)
+        let descriptor = FetchDescriptor<PhoneHeartbeatSeries>(
+            predicate: #Predicate { $0.startDate >= cutoff },
+            sortBy: [SortDescriptor(\.startDate)]
+        )
+        let records = try modelContext.fetch(descriptor)
+        let calendar = Calendar.current
+
+        var sums: [Date: (lf: Double, hf: Double, count: Int)] = [:]
+        for record in records {
+            guard record.isSelfConsistent else { continue }
+            guard let result = HRVAnalyzer.analyze(beatOffsetsMillis: record.beatOffsetsMillis,
+                                                   gapsBeforeBeat: record.gapFlags),
+                  let lf = result.lfNorm, let hf = result.hfNorm else { continue }
+            let hour = calendar.dateInterval(of: .hour, for: record.startDate)?.start
+                ?? record.startDate
+            var entry = sums[hour] ?? (0, 0, 0)
+            entry.lf += lf
+            entry.hf += hf
+            entry.count += 1
+            sums[hour] = entry
+        }
+
+        return sums
+            .map { hour, entry in
+                HRVTrendBucket(hourStart: hour,
+                               lfNorm: entry.lf / Double(entry.count),
+                               hfNorm: entry.hf / Double(entry.count),
+                               seriesCount: entry.count)
+            }
+            .sorted { $0.hourStart < $1.hourStart }
+    }
 
     // MARK: - 读取：概览与状态
 
