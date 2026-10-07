@@ -471,3 +471,76 @@ actor PhoneStore {
                         skippedInconsistent: skippedInconsistent,
                         minimumIntervals: minimum)
     }
+
+// MARK: - 读取：概览与状态
+
+    /// 每个指标的最新值 / 总条数 / 时间范围。
+    ///
+    /// 刻意按 `MetricDisplay.all` 的**注册顺序**遍历，
+    /// 而且**没有数据的指标也会返回**（count = 0）：
+    /// 否则用户看到的是"少了几个指标"，而不是"这几个指标没数据"——
+    /// 前者看起来像 bug，后者才是事实。
+    func metricSummaries() throws -> [PhoneMetricSummary] {
+        MetricDisplay.all.map { info in
+            let id = info.id
+            let count = (try? modelContext.fetchCount(
+                FetchDescriptor<PhoneSample>(predicate: #Predicate { $0.metricID == id })
+            )) ?? 0
+
+            var latest: PhoneSample?
+            if count > 0 {
+                var descriptor = FetchDescriptor<PhoneSample>(
+                    predicate: #Predicate { $0.metricID == id },
+                    sortBy: [SortDescriptor(\.startDate, order: .reverse)]
+                )
+                descriptor.fetchLimit = 1
+                latest = (try? modelContext.fetch(descriptor))?.first
+            }
+
+            var earliest: Date?
+            if count > 0 {
+                var descriptor = FetchDescriptor<PhoneSample>(
+                    predicate: #Predicate { $0.metricID == id },
+                    sortBy: [SortDescriptor(\.startDate, order: .forward)]
+                )
+                descriptor.fetchLimit = 1
+                earliest = (try? modelContext.fetch(descriptor))?.first?.startDate
+            }
+
+            return PhoneMetricSummary(metricID: id,
+                                      count: count,
+                                      latestDate: latest?.startDate,
+                                      latestValue: latest?.value,
+                                      latestCategoryValue: latest?.categoryValue,
+                                      earliestDate: earliest)
+        }
+    }
+
+    func totalSampleCount() throws -> Int {
+        try modelContext.fetchCount(FetchDescriptor<PhoneSample>())
+    }
+
+    func rollupCount() throws -> Int {
+        try modelContext.fetchCount(FetchDescriptor<PhoneRollup>())
+    }
+
+    func oldestSampleDate() throws -> Date? {
+        var descriptor = FetchDescriptor<PhoneSample>(sortBy: [SortDescriptor(\.startDate, order: .forward)])
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first?.startDate
+    }
+
+    func newestSampleDate() throws -> Date? {
+        var descriptor = FetchDescriptor<PhoneSample>(sortBy: [SortDescriptor(\.startDate, order: .reverse)])
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first?.startDate
+    }
+
+    /// 本机最后一次收到数据的时间。用 `receivedAt` 而不是 `startDate`：
+    /// 后者是采样时间，无法回答"传输链路还活着吗"。
+    func lastReceivedAt() throws -> Date? {
+        var descriptor = FetchDescriptor<PhoneSample>(sortBy: [SortDescriptor(\.receivedAt, order: .reverse)])
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first?.receivedAt
+    }
+}

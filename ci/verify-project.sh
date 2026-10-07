@@ -957,6 +957,28 @@ if grep -q 'chartYScale(domain: 0\.\.\.100)' ios/HRVCards.swift 2>/dev/null; the
 else
   bad "河流图纵轴没有固定 0–100 —— 归一化值的和恒为 100，必须固定"
 fi
+echo
+echo "== 19. Swift 文件完整性（花括号平衡）"
+# 🔴 实测踩到：用 `Substring(0, n) + 新内容` 覆盖文件时**静默丢掉了尾部** ——
+# `PhoneStore.swift` 少了 6 个方法和 actor 收尾的 `}`，CI 报
+#   error: expected '}' in actor
+# 而**本地自检全绿**（它查的是"结构不变量"，不是"语法完整性"），
+# 所以要等一整轮 CI 才发现。花括号平衡是这类"被截断"最便宜的探针。
+BRACE_BAD=""
+BRACE_FILES=0
+for f in $(find ios shared watch -name '*.swift' 2>/dev/null); do
+  BRACE_FILES=$((BRACE_FILES + 1))
+  o=$(code_only "$f" | tr -cd '{' | wc -c | tr -d ' ')
+  c=$(code_only "$f" | tr -cd '}' | wc -c | tr -d ' ')
+  [ "$o" != "$c" ] && BRACE_BAD="$BRACE_BAD $f($o/$c)"
+done
+if [ "$BRACE_FILES" -lt 10 ]; then
+  bad "只扫到 $BRACE_FILES 个 Swift 文件 —— 检查本身没跑起来（目录变了？）"
+elif [ -z "$BRACE_BAD" ]; then
+  ok "全部 $BRACE_FILES 个 Swift 文件的 { } 平衡（没有被截断）"
+else
+  bad "这些 Swift 文件 { } 不平衡，很可能被截断了：$BRACE_BAD"
+fi
 # ---------- 汇总 ----------
 printf '\n== 汇总：%d 通过，%d 失败\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
