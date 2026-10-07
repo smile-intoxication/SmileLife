@@ -823,6 +823,29 @@ else
   bad "HeartbeatHRVCard 没有出现在 ChartView 里 —— 写了但没人用"
 fi
 
+# —— 结构体里声明为 `let` 的字段，不许在**构造之后**再赋值 ——
+# 实测踩到（run #52）：`HRVResult.frequencyResolution` 写成 `let`，
+# 却在 `analyze()` 里 `result.frequencyResolution = ...`，CI 报
+#   error: cannot assign to property: 'frequencyResolution' is a 'let' constant
+# 这类错误**本机完全看不出来**（没有 Swift 编译器），而且和业务逻辑无关、
+# 纯粹是"声明与用法不一致"——所以最适合用机械检查挡在推送之前。
+HRV_LET=$(code_only ios/HRVAnalysis.swift | awk '/^struct HRVResult/,/^}/' \
+          | grep -oE '^    let [a-zA-Z]+' | awk '{print $2}')
+if [ -z "$HRV_LET" ]; then
+  bad "没能从 HRVResult 提取到 let 字段（结构变了？）"
+else
+  HRV_LET_BAD=""
+  for field in $HRV_LET; do
+    if code_only ios/HRVAnalysis.swift | grep -qE "result\.$field *="; then
+      HRV_LET_BAD="$HRV_LET_BAD $field"
+    fi
+  done
+  if [ -z "$HRV_LET_BAD" ]; then
+    ok "HRVResult 的 let 字段没有被构造后赋值（$(printf '%s\n' "$HRV_LET" | wc -l | tr -d ' ') 个）"
+  else
+    bad "HRVResult 里这些字段是 let 却在构造后被赋值（CI 会报 cannot assign to property）：$HRV_LET_BAD"
+  fi
+fi
 # 频域算法是**本地验证过**的（手写 FFT 与朴素 DFT 对照、频带功率对已知信号），
 # 验证脚本不能丢 —— 丢了就没人能复核"频带积分有没有少乘 Δf"这类不出声的错误。
 if ls ci/hrv_check*.py >/dev/null 2>&1; then

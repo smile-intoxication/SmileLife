@@ -195,8 +195,12 @@ struct HRVResult: Sendable {
 
     /// 分析时长（秒）。频域分辨率就是它的倒数。
     let durationSeconds: Double
-    /// 频率分辨率 Δf = fs / FFT 长度
-    let frequencyResolution: Double
+    /// 频率分辨率 Δf = fs / FFT 长度。
+    ///
+    /// ⚠️ 必须是 `var`：它要等功率谱算完才知道，所以在构造之后才赋值。
+    /// 写成 `let` 会报 `cannot assign to property: ... is a 'let' constant` ——
+    /// **这类错误本机完全看不出来，只有 CI 能发现**（实测在 run #52 踩到）。
+    var frequencyResolution: Double
     /// 采样率（插值用）
     let samplingRate: Double
 
