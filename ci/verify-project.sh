@@ -1083,16 +1083,22 @@ else
   bad "小组件里还有 AppIntentConfiguration（那个可配置的旧入口没撤干净）：$AIC_LEFT"
 fi
 
-# WidgetBundleBuilder 最多 10 个孩子，超过必须嵌套 —— 平铺会报"extra argument"
-for group in HeartMetricsWidgets OtherMetricsWidgets AppleWatchHealthWidgets; do
-  kids=$(awk "/struct $group: WidgetBundle/,/^}/" watch/Widget/MetricWidgetDefinitions.swift \
-         | grep -cE '^\s+[A-Za-z0-9_]+\(\)' || true)
-  if [ "$kids" -le 10 ]; then
-    ok "$group 的孩子数 $kids ≤ 10（WidgetBundleBuilder 的上限）"
-  else
-    bad "$group 有 $kids 个孩子，超过 WidgetBundleBuilder 的 10 个上限 —— 必须再嵌套一层"
-  fi
-done
+# 🔴 **不许嵌套 bundle** —— `WidgetBundle` 不 conform 到 `Widget`，子 bundle 不能当孩子：
+#   error: no exact matches in call to static method 'buildExpression'
+# 这是我实测赌错过的一次（原以为能像 ViewBuilder 那样嵌套绕开孩子数上限）。
+BUNDLE_COUNT=$(grep -c 'WidgetBundle {' watch/Widget/MetricWidgetDefinitions.swift || true)
+if [ "$BUNDLE_COUNT" = "1" ]; then
+  ok "只有一个 WidgetBundle（没有嵌套 —— 子 bundle 不能当孩子用）"
+else
+  bad "有 $BUNDLE_COUNT 个 WidgetBundle —— WidgetBundle 不 conform 到 Widget，嵌套会编译失败"
+fi
+# 平铺的孩子数必须等于指标数（多一个少一个都是漏了或多了）
+BUNDLE_KIDS=$(awk '/@main/,/^}/' watch/Widget/MetricWidgetDefinitions.swift | grep -cE '^\s+[A-Za-z0-9_]+\(\)' || true)
+if [ "$BUNDLE_KIDS" = "$(printf '%s\n' "$WIDGET_IDS" | wc -l | tr -d ' ')" ]; then
+  ok "@main bundle 平铺了 $BUNDLE_KIDS 个小组件，与指标数一致"
+else
+  bad "@main bundle 里有 $BUNDLE_KIDS 个小组件，但指标有 $(printf '%s\n' "$WIDGET_IDS" | wc -l | tr -d ' ') 个"
+fi
 # ---------- 汇总 ----------
 printf '\n== 汇总：%d 通过，%d 失败\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

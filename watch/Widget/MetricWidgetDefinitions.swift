@@ -186,12 +186,19 @@ struct VO2MaxWidget: Widget {
 
 // MARK: - Bundle
 //
-// ⚠️ **必须嵌套**：`WidgetBundleBuilder` 和 `ViewBuilder` 一样，
-// `buildBlock` 最多支持 **10** 个孩子。我们有 12 个指标，直接平铺会编译失败
-// （报的还是"extra argument"这种指不到根因的错）。
-// 所以拆成两个子 bundle，最外层只有 2 个孩子。
+// ## 🔴 这里有个我赌错过的假设，记下来
+// 我原以为可以像 `ViewBuilder` 那样**嵌套 bundle** 来绕开孩子数上限，
+// 于是写了 `HeartMetricsWidgets`(7) + `OtherMetricsWidgets`(5) 套在 `@main` 里。
+// **`WidgetBundle` 不 conform 到 `Widget`**，子 bundle 不能当孩子用，CI 报：
+// ```
+// error: no exact matches in call to static method 'buildExpression'
+// ```
+// 所以现在**平铺**：12 个指标小组件直接列在 `@main` bundle 里。
+// ⚠️ 这也意味着"能不能超过 10 个"完全取决于 `WidgetBundleBuilder` 自己的
+// `buildBlock` 重载 —— **实测 CI 说了算**，不要凭 `ViewBuilder` 的经验推。
 
-struct HeartMetricsWidgets: WidgetBundle {
+@main
+struct AppleWatchHealthWidgets: WidgetBundle {
     var body: some Widget {
         HeartRateWidget()
         RestingHeartRateWidget()
@@ -200,23 +207,10 @@ struct HeartMetricsWidgets: WidgetBundle {
         HRVRMSSDWidget()
         RespiratoryRateWidget()
         OxygenSaturationWidget()
-    }
-}
-
-struct OtherMetricsWidgets: WidgetBundle {
-    var body: some Widget {
         WristTemperatureWidget()
         SleepWidget()
         ActiveEnergyWidget()
         ExerciseTimeWidget()
         VO2MaxWidget()
-    }
-}
-
-@main
-struct AppleWatchHealthWidgets: WidgetBundle {
-    var body: some Widget {
-        HeartMetricsWidgets()
-        OtherMetricsWidgets()
     }
 }
