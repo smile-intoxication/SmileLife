@@ -149,8 +149,14 @@ private struct FreshnessRowView: View {
     }
 
     /// 越久没更新越显眼 —— 但只是**提示**，不是判定（用户可能本来就没戴表）。
+    ///
+    /// ⚠️ 返回类型是 `Color`，所以**只能用真正的 `Color`**：
+    /// `Color.secondary` 存在，但 **`Color.tertiary` 不存在**（`.tertiary` 是
+    /// `HierarchicalShapeStyle`，只能用在 `foregroundStyle(_:)` 那类接受
+    /// `some ShapeStyle` 的地方）。写成 `.tertiary` 会报
+    /// `instance member 'tertiary' cannot be used on type 'Color'`。
     private var ageColor: Color {
-        guard let age = row.age(now: now) else { return .tertiary }
+        guard let age = row.age(now: now) else { return .secondary }
         if age < 3600 { return .primary }
         if age < 24 * 3600 { return .orange }
         return .red

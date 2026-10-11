@@ -64,8 +64,14 @@ extension PhoneStore {
     /// | 1 小时 / 24 小时 / 总条数 | `fetchCount` | 走索引，很便宜 |
     /// | **中位间隔** | 把**最近 6 小时**的时间戳取出来排序 | 唯一较贵的一步，所以有窗口 + 上限 |
     func metricFreshness(now: Date = Date()) throws -> [MetricFreshness] {
-        var rows = MetricDisplay.all.map { info in
-            try freshness(metricID: info.id, title: info.title, now: now)
+        // ⚠️ 刻意用**显式 for 循环**而不是 `map { try ... }`：
+        // 后者要靠 `map` 是 `rethrows` 才能把 `try` 传出去，一旦编译器
+        // 对闭包的抛出性推断不如预期，就会报
+        //   `call can throw but is not marked with 'try'`
+        // 而且**报的位置会指到别处**，很难看出根因。显式循环没有这个问题。
+        var rows: [MetricFreshness] = []
+        for info in MetricDisplay.all {
+            rows.append(try freshness(metricID: info.id, title: info.title, now: now))
         }
         // 心跳序列是**另一张表**（系统产生，不是我们采的指标），
         // 但它同样要回答"系统多久产生一条" —— 复用同一套算法。

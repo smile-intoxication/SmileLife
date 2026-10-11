@@ -1018,6 +1018,81 @@ if grep -q 'UIPasteboard.general.string' ios/FreshnessView.swift 2>/dev/null; th
 else
   bad "缺少复制导出 —— 需求方要的就是「能看到」"
 fi
+echo
+echo "== 21. 小组件：每个指标一个（漏了不会报错，只会凭空消失）"
+# 需求方要求"每个指标独立一个小组件"，不再用可配置的那一个。
+# 代价是**加指标要动小组件文件** —— 所以这里机械断言两边一致。
+WIDGET_IDS=$(grep -oE 'metricWidgetConfiguration\(metricID: "[a-z0-9_]+"' watch/Widget/MetricWidgetDefinitions.swift 2>/dev/null \
+             | sed 's/.*"\([a-z0-9_]*\)"/\1/' | sort -u)
+DISPLAY_IDS=$(grep -oE 'Info\(id: "[a-z0-9_]+"' shared/MetricDisplay.swift 2>/dev/null \
+             | sed 's/.*"\([a-z0-9_]*\)"/\1/' | sort -u)
+if [ -z "$WIDGET_IDS" ] || [ -z "$DISPLAY_IDS" ]; then
+  bad "没能提取到小组件指标或 MetricDisplay 指标（结构变了？）"
+else
+  MISSING=$(comm -13 <(printf '%s\n' "$WIDGET_IDS") <(printf '%s\n' "$DISPLAY_IDS") | tr '\n' ' ')
+  EXTRA=$(comm -23 <(printf '%s\n' "$WIDGET_IDS") <(printf '%s\n' "$DISPLAY_IDS") | tr '\n' ' ')
+  if [ -z "$MISSING" ] && [ -z "$EXTRA" ]; then
+    ok "每个指标都有独立小组件（$(printf '%s\n' "$WIDGET_IDS" | wc -l | tr -d ' ') 个，与 MetricDisplay 一致）"
+  else
+    [ -n "$MISSING" ] && bad "这些指标**没有**小组件（会在小组件库里凭空消失）：$MISSING"
+    [ -n "$EXTRA" ] && bad "这些小组件的 id 在 MetricDisplay 里不存在：$EXTRA"
+  fi
+fi
+
+# 显示名是**抄来的字面量**（widget target 拿不到 MetricDisplay），必然有漂移风险。
+DISPLAY_PAIRS=$(tr '\n' ' ' < shared/MetricDisplay.swift \
+                | grep -oE 'Info\(id: "[a-z0-9_]+", *title: "[^"]+"' \
+                | sed 's/Info(id: "//; s/", *title: "/=/; s/"$//' | sort)
+WIDGET_PAIRS=$(tr '\n' ' ' < watch/Widget/MetricWidgetDefinitions.swift \
+               | grep -oE 'metricWidgetConfiguration\(metricID: "[a-z0-9_]+", displayName: "[^"]+"' \
+               | sed 's/.*metricID: "//; s/", displayName: "/=/; s/"$//' | sort)
+if [ -z "$DISPLAY_PAIRS" ] || [ -z "$WIDGET_PAIRS" ]; then
+  bad "没能提取到指标标题对（用于校验小组件里的显示名）"
+else
+  DRIFT=$(comm -3 <(printf '%s\n' "$DISPLAY_PAIRS") <(printf '%s\n' "$WIDGET_PAIRS") | tr -d '\t' | tr '\n' ' ')
+  if [ -z "$DRIFT" ]; then
+    ok "小组件的显示名与 MetricDisplay 完全一致（无漂移）"
+  else
+    bad "小组件显示名和 MetricDisplay 漂移了：$DRIFT"
+  fi
+fi
+
+# 同一模块里出现两个 @main 会**直接编译失败**；一个都没有则小组件全不生效。
+MAIN_COUNT=$(cat watch/Widget/*.swift | grep -c '^@main' || true)
+if [ "$MAIN_COUNT" = "1" ]; then
+  ok "widget target 里恰好一个 @main"
+else
+  bad "widget target 里有 $MAIN_COUNT 个 @main（必须恰好 1 个）"
+fi
+
+# 「选一个看一个」那套必须已经撤掉 —— 留着它会有两个入口，用户会困惑。
+#
+# ⚠️ 判据要剥掉注释：坑 #40 已经栽过三次 ——
+# 这条规则的**说明文字本身**就写着 `AppIntentConfiguration`（我在注释里解释
+# "为什么撤掉它"），直接 grep 会把规则自己判失败。**剥注释**在这里就够了，
+# 因为这个词只出现在注释里（不像 HRV 那次还出现在界面文案里）。
+AIC_LEFT=""
+for f in watch/Widget/*.swift; do
+  if code_only "$f" | grep -q 'AppIntentConfiguration'; then
+    AIC_LEFT="$AIC_LEFT $(basename "$f")"
+  fi
+done
+if [ -z "$AIC_LEFT" ]; then
+  ok "可配置指标选择器已撤掉（只剩每个指标独立的入口）"
+else
+  bad "小组件里还有 AppIntentConfiguration（那个可配置的旧入口没撤干净）：$AIC_LEFT"
+fi
+
+# WidgetBundleBuilder 最多 10 个孩子，超过必须嵌套 —— 平铺会报"extra argument"
+for group in HeartMetricsWidgets OtherMetricsWidgets AppleWatchHealthWidgets; do
+  kids=$(awk "/struct $group: WidgetBundle/,/^}/" watch/Widget/MetricWidgetDefinitions.swift \
+         | grep -cE '^\s+[A-Za-z0-9_]+\(\)' || true)
+  if [ "$kids" -le 10 ]; then
+    ok "$group 的孩子数 $kids ≤ 10（WidgetBundleBuilder 的上限）"
+  else
+    bad "$group 有 $kids 个孩子，超过 WidgetBundleBuilder 的 10 个上限 —— 必须再嵌套一层"
+  fi
+done
 # ---------- 汇总 ----------
 printf '\n== 汇总：%d 通过，%d 失败\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
