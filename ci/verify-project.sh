@@ -979,6 +979,45 @@ elif [ -z "$BRACE_BAD" ]; then
 else
   bad "这些 Swift 文件 { } 不平衡，很可能被截断了：$BRACE_BAD"
 fi
+echo
+echo "== 20. 新鲜度视图（各指标多久更新一次）"
+# 这张表要回答"它多久来一条"。三个容易退化的点，各一条守卫。
+if grep -q 'FreshnessSection()' ios/StatusView.swift 2>/dev/null; then
+  ok "新鲜度视图已接进「状态」页签"
+else
+  bad "FreshnessSection 没有出现在 StatusView 里 —— 写了但没人用"
+fi
+# 🔴 必须用**中位数**。用平均值的话，一次过夜的长间隔就能把它拉到毫无意义 ——
+#    而界面上看起来完全正常（就是个数字）。
+if grep -q 'sorted()' ios/MetricFreshness.swift 2>/dev/null \
+   && grep -q 'func median' ios/MetricFreshness.swift 2>/dev/null; then
+  if code_only ios/MetricFreshness.swift | grep -qE 'reduce\(0, \+\) *\/ *Double\(values\.count\)'; then
+    bad "MetricFreshness 里出现了求平均值的写法 —— 中位间隔必须用中位数"
+  else
+    ok "中位间隔用的是中位数（先排序再取中）"
+  fi
+else
+  bad "找不到 MetricFreshness.median 的排序实现 —— 中位数算法可能被改坏了"
+fi
+# 截断必须回报到界面（坑 #33：静默截断比报错更糟）
+if grep -q 'freshnessIntervalSampleCap' ios/MetricFreshness.swift 2>/dev/null \
+   && grep -q 'intervalTruncated' ios/FreshnessView.swift 2>/dev/null; then
+  ok "统计上限撞到时会在界面上如实说明（不静默截断）"
+else
+  bad "抓取上限没有回报到界面 —— 用户会以为'数据就这么多'"
+fi
+# 「一条都没有」的指标不能被静默藏掉
+if grep -q 'emptyCount' ios/FreshnessView.swift 2>/dev/null; then
+  ok "没有任何数据的指标会汇总说明（不是静默消失）"
+else
+  bad "没有数据的指标被静默隐藏了 —— 「没数据」和「没这个指标」是两件事"
+fi
+# 复制导出（需求方要"能看到"，贴文本比截图有用）
+if grep -q 'UIPasteboard.general.string' ios/FreshnessView.swift 2>/dev/null; then
+  ok "新鲜度表可以一键复制成文本"
+else
+  bad "缺少复制导出 —— 需求方要的就是「能看到」"
+fi
 # ---------- 汇总 ----------
 printf '\n== 汇总：%d 通过，%d 失败\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

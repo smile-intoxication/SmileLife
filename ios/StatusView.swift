@@ -33,6 +33,7 @@ struct StatusView: View {
                 linkSection
                 storeSection
                 metricsSection
+                freshnessSection
                 notesSection
 
                 if let loadError {
@@ -108,6 +109,18 @@ struct StatusView: View {
     }
 
     // MARK: - 各指标
+
+    /// 「各指标采集节奏」—— 回答"它**多久**更新一次"。
+    ///
+    /// 单独一节而不是塞进"接收情况"：那一节答的是"总共收了多少"，
+    /// 这一节答的是"以什么节奏在收" —— 两个不同的问题。
+    private var freshnessSection: some View {
+        Section("各指标采集节奏（多久更新一次）") {
+            FreshnessSection()
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+        }
+    }
 
     private var metricsSection: some View {
         Section("各指标接收情况") {
