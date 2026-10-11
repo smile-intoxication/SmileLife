@@ -98,6 +98,7 @@ struct FreshnessSection: View {
             if populated.contains(where: { $0.intervalTruncated }) {
                 Text("**有指标撞到了 \(PhoneStore.freshnessIntervalSampleCap) 条的统计上限** —— 它的中位间隔只代表窗口的开头一段，不代表全部。")
             }
+            Text("每行最后那 24 根小柱是近 24 小时**逐小时**的条数（左 = 24 小时前）。柱高按**该指标自己**的峰值归一，所以**只能看形状、不能跨指标比高低** —— 空小时会留一根灰柱，不是没渲染。")
             Text("点右上角「复制」可以把整张表导成文本（贴出来比截图有用得多）。")
         }
         .font(.caption2)
@@ -139,6 +140,9 @@ private struct FreshnessRowView: View {
             Text(spanText)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+            if row.hourlyCounts.count == 24 {
+                HourlyDensityRow(counts: row.hourlyCounts)
+            }
         }
     }
 
@@ -177,5 +181,46 @@ private struct FreshnessRowView: View {
             parts.append("⚠️ 统计被截断（窗口内 ≥\(PhoneStore.freshnessIntervalSampleCap) 条）")
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// 近 24 小时的**逐小时条数** —— 24 根小柱，左 = 24 小时前。
+///
+/// ## 为什么手绘而不用 `Chart`
+/// 这一页有十几个指标，**每个都建一个 `Chart` 会让它明显卡顿**；
+/// 而这里只需要"哪几个小时是空的"这一个信息，24 个 `Capsule` 就够。
+/// （图表形态由数据决定，但**实现代价**也是一条约束 —— 20 行的手绘能表达清楚时不必上 Chart。）
+///
+/// ⚠️ 空小时**画成一根 2pt 的灰柱**，而不是什么都不画:
+/// "没有柱子"和"那一格不存在"在视觉上分不开，用户会以为是渲染问题。
+private struct HourlyDensityRow: View {
+
+    let counts: [Int]
+
+    /// 用**这一行自己的峰值**做归一 —— 不同指标的绝对量级差几个数量级
+    /// （心率一小时上千条、血氧一小时可能就几条），共用一个刻度等于全压平。
+    /// ⚠️ 代价：**柱高不能跨指标比较**。所以这只是"形状提示"，
+    /// 真正的数值看上面的「近24h」和复制出来的文本。
+    private var peak: Int { max(1, counts.max() ?? 1) }
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 1) {
+            // ⚠️ 用 `indices` 而不是 `Array(counts.enumerated())`：
+            // 遍历元组时闭包**不能写成 `{ _, count in }`**（闭包只有一个元组参数，
+            // 解构语法在闭包里不成立），会直接编译失败。
+            ForEach(counts.indices, id: \.self) { index in
+                Capsule()
+                    .fill(counts[index] == 0
+                          ? Color.secondary.opacity(0.25)
+                          : Color.accentColor)
+                    .frame(height: barHeight(counts[index]))
+            }
+        }
+        .frame(height: 13, alignment: .bottom)
+    }
+
+    private func barHeight(_ count: Int) -> CGFloat {
+        guard count > 0 else { return 2 }
+        return 2 + CGFloat(count) / CGFloat(peak) * 9
     }
 }

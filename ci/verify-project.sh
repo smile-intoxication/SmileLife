@@ -1012,6 +1012,37 @@ if grep -q 'emptyCount' ios/FreshnessView.swift 2>/dev/null; then
 else
   bad "没有数据的指标被静默隐藏了 —— 「没数据」和「没这个指标」是两件事"
 fi
+# —— 按小时密度（近 24 小时逐小时条数）——
+if grep -q 'hourlyCounts' ios/MetricFreshness.swift 2>/dev/null \
+   && grep -q 'HourlyDensityRow(counts:' ios/FreshnessView.swift 2>/dev/null; then
+  ok "新鲜度表带了近 24 小时的逐小时密度（柱状）"
+else
+  bad "逐小时密度没有接上（MetricFreshness.hourlyCounts 或界面渲染缺一）"
+fi
+# 必须是 **24** 个桶 —— 少一个会静默少画一根柱子，看起来像"那一小时没数据"，而那是另一回事
+if grep -qE 'reserveCapacity\(24\)' ios/MetricFreshness.swift 2>/dev/null \
+   && grep -qE 'index in 0\.\.<24' ios/MetricFreshness.swift 2>/dev/null \
+   && grep -q 'count == 24' ios/FreshnessView.swift 2>/dev/null; then
+  ok "逐小时密度是 24 个桶（界面也按 24 校验）"
+else
+  bad "逐小时密度不是 24 个桶 —— 会静默少画柱子，被误读成「那一小时没数据」"
+fi
+# 累计差分，不是区间谓词 —— 谓词形状是本文件里已经验过能跑的那种
+if grep -q 'countSince' ios/MetricFreshness.swift 2>/dev/null; then
+  if awk '/static func hourlyCounts/,/^    }/' ios/MetricFreshness.swift | grep -q 'startDate <'; then
+    bad "逐小时用了区间谓词（startDate <）—— 应改成两个单边条件相减"
+  else
+    ok "逐小时用「累计条数相减」，谓词形状与既有代码一致"
+  fi
+else
+  bad "找不到 MetricFreshness.hourlyCounts 的实现"
+fi
+# 空小时必须留一根可见的柱子（"没有柱子"和"那一格不存在"视觉上分不开）
+if grep -q 'guard count > 0 else { return 2 }' ios/FreshnessView.swift 2>/dev/null; then
+  ok "空小时留灰柱（不是空白）"
+else
+  bad "空小时没有留可见的柱子 —— 用户会以为是渲染问题"
+fi
 # 复制导出（需求方要"能看到"，贴文本比截图有用）
 if grep -q 'UIPasteboard.general.string' ios/FreshnessView.swift 2>/dev/null; then
   ok "新鲜度表可以一键复制成文本"

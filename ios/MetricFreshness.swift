@@ -36,6 +36,15 @@ struct MetricFreshness: Identifiable, Sendable {
     /// （坑 #33：静默截断比报错更糟，用户会以为"数据就这么多"）
     let intervalTruncated: Bool
 
+    /// 近 24 小时**逐小时**的条数：`[0]` = 24 小时前那一小时，`[23]` = 最近一小时。
+    ///
+    /// 用途是回答"**哪几个小时在采、哪几个小时是空的**" ——
+    /// 中位间隔只给一个数，掩盖了"白天有晚上没有"这种结构。
+    ///
+    /// 写成 `var` + 默认空数组，是为了**构造之后再赋值**：它要 25 次计数查询，
+    /// 和前面那些字段是两条独立的路径（坑：`let` 字段构造后不能再赋值）。
+    var hourlyCounts: [Int] = []
+
     /// 距今多久（给界面用；`nil` = 没有数据）
     func age(now: Date) -> TimeInterval? {
         latest.map { now.timeIntervalSince($0) }
@@ -123,18 +132,26 @@ extension PhoneStore {
         windowDescriptor.fetchLimit = Self.freshnessIntervalSampleCap
         let dates = ((try? modelContext.fetch(windowDescriptor)) ?? []).map(\.startDate)
 
-        return MetricFreshness(metricID: id,
-                               title: title,
-                               latest: latest,
-                               earliest: earliest,
-                               countLastHour: lastHour,
-                               countLastDay: lastDay,
-                               countTotal: total,
-                               medianInterval: Self.medianInterval(of: dates),
-                               minInterval: Self.intervalStats(dates).min,
-                               maxInterval: Self.intervalStats(dates).max,
-                               intervalSampleCount: dates.count,
-                               intervalTruncated: dates.count >= Self.freshnessIntervalSampleCap)
+        var row = MetricFreshness(metricID: id,
+                                  title: title,
+                                  latest: latest,
+                                  earliest: earliest,
+                                  countLastHour: lastHour,
+                                  countLastDay: lastDay,
+                                  countTotal: total,
+                                  medianInterval: Self.medianInterval(of: dates),
+                                  minInterval: Self.intervalStats(dates).min,
+                                  maxInterval: Self.intervalStats(dates).max,
+                                  intervalSampleCount: dates.count,
+                                  intervalTruncated: dates.count >= Self.freshnessIntervalSampleCap)
+        row.hourlyCounts = Self.hourlyCounts { boundary in
+            try? modelContext.fetchCount(
+                FetchDescriptor<PhoneSample>(
+                    predicate: #Predicate { $0.metricID == id && $0.startDate >= boundary }
+                )
+            )
+        }
+        return row
     }
 
     // MARK: 心跳序列（PhoneHeartbeatSeries）
@@ -177,18 +194,26 @@ extension PhoneStore {
         )) ?? []).map(\.startDate)
         let stats = Self.intervalStats(dates)
 
-        return MetricFreshness(metricID: "heartbeat_series",
-                               title: "心跳序列（系统产生）",
-                               latest: latest,
-                               earliest: earliest,
-                               countLastHour: lastHour,
-                               countLastDay: lastDay,
-                               countTotal: total,
-                               medianInterval: Self.medianInterval(of: dates),
-                               minInterval: stats.min,
-                               maxInterval: stats.max,
-                               intervalSampleCount: dates.count,
-                               intervalTruncated: false)
+        var row = MetricFreshness(metricID: "heartbeat_series",
+                                  title: "心跳序列（系统产生）",
+                                  latest: latest,
+                                  earliest: earliest,
+                                  countLastHour: lastHour,
+                                  countLastDay: lastDay,
+                                  countTotal: total,
+                                  medianInterval: Self.medianInterval(of: dates),
+                                  minInterval: stats.min,
+                                  maxInterval: stats.max,
+                                  intervalSampleCount: dates.count,
+                                  intervalTruncated: false)
+        row.hourlyCounts = Self.hourlyCounts { boundary in
+            try? modelContext.fetchCount(
+                FetchDescriptor<PhoneHeartbeatSeries>(
+                    predicate: #Predicate { $0.startDate >= boundary }
+                )
+            )
+        }
+        return row
     }
 
     // MARK: 间隔统计
@@ -212,6 +237,40 @@ extension PhoneStore {
         return (values.min(), values.max())
     }
 
+    /// 近 24 小时的逐小时条数。
+    ///
+    /// ## 为什么用"累计条数相减"而不是"逐小时区间查询"
+    /// 区间查询要写 `metricID == id && startDate >= a && startDate < b`（三个条件），
+    /// 而累计查询只要 `metricID == id && startDate >= a`（两个条件）——
+    /// **后者是这个文件里已经在用、已经验过能跑的那种谓词形状**。
+    /// 相邻两个累计值相减，结果完全等价。
+    /// 📌 通用手法：**把区间条件换成两个单边条件相减** —— 谓词更简单，
+    /// 更不容易踩到 SwiftData 谓词表达能力的边界。
+    ///
+    /// `countSince` 由调用方注入（`PhoneSample` 和 `PhoneHeartbeatSeries`
+    /// 是两张不同的表，SwiftData 的取数做不到泛型复用）。
+    static func hourlyCounts(countSince: (Date) -> Int?) -> [Int] {
+        let calendar = Calendar.current
+        let now = Date()
+        guard let currentHour = calendar.dateInterval(of: .hour, for: now)?.start else { return [] }
+
+        // 25 个边界：b[0] = 24 小时前的整点，b[24] = 当前整点
+        var boundaries: [Date] = []
+        for offset in stride(from: 24, through: 0, by: -1) {
+            guard let d = calendar.date(byAdding: .hour, value: -offset, to: currentHour) else { return [] }
+            boundaries.append(d)
+        }
+        let cumulative = boundaries.map { countSince($0) ?? 0 }
+
+        var result: [Int] = []
+        result.reserveCapacity(24)
+        for index in 0..<24 {
+            // `max(0, ...)` 是防御：理论上累计值单调不增，但查询失败会返回 0，
+            // 那时差分会变成负数 —— 宁可为 0 也不要让界面画出一根反向的柱子。
+            result.append(max(0, cumulative[index] - cumulative[index + 1]))
+        }
+        return result
+    }
     static func median(_ values: [TimeInterval]) -> TimeInterval? {
         guard !values.isEmpty else { return nil }
         let sorted = values.sorted()
@@ -234,8 +293,9 @@ extension MetricFreshness {
         lines.append("长明护心 · 各指标采集节奏")
         lines.append("导出时间：\(Self.stamp(now))")
         lines.append("中位间隔 = 相邻两条的典型时间差（窗口 6 小时；心跳序列为 7 天）")
+        lines.append("最后一列是近 24 小时每个整点的条数，空格分隔，最左是 24 小时前")
         lines.append("")
-        lines.append("指标\t最新一条\t距今\t中位间隔\t最小\t最大\t近1h\t近24h\t总条数\t样本数\t截断")
+        lines.append("指标\t最新一条\t距今\t中位间隔\t最小\t最大\t近1h\t近24h\t总条数\t样本数\t截断\t近24h逐小时（左=最早）")
         for row in rows {
             let values: [String] = [
                 row.title,
@@ -248,6 +308,7 @@ extension MetricFreshness {
                 "\(row.countLastDay)",
                 "\(row.countTotal)",
                 "\(row.intervalSampleCount)",
+                row.hourlyCounts.map(String.init).joined(separator: " "),
                 row.intervalTruncated ? "是" : "否",
             ]
             lines.append(values.joined(separator: "\t"))
